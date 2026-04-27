@@ -57,6 +57,8 @@ std::string CppEmitter::emitSourcePreamble(const std::string& headerToInclude) {
     std::string include_name = (last_slash == std::string::npos) ? headerToInclude : headerToInclude.substr(last_slash + 1);
 
     preamble += "#include \"" + include_name + "\"\n\n";
+    preamble += "#include <stdexcept>\n";
+    preamble += "#include <string>\n\n";
     preamble += "#include \"runtime/uper/UperLength.h\"\n";
     preamble += "#include \"runtime/uper/UperInteger.h\"\n";
     preamble += "#include \"runtime/uper/UperSequence.h\"\n";

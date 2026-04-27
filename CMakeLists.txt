@@ -117,6 +117,30 @@ add_custom_target(dist_runtime_headers ALL
 enable_testing()
 add_subdirectory(tests)
 
+# ── Schema integration tests (one executable per schema) ─────────────────────
+# Each tests/<schema-stem>/ directory is expected to contain a
+# test_<lib_name>.cpp file that links against the generated schema library.
+foreach(SCHEMA ${ASN1_SCHEMAS})
+    get_filename_component(_SCHEMA_FULL_NAME ${SCHEMA} NAME)
+    string(REPLACE ".asn1" "" _SCHEMA_STEM ${_SCHEMA_FULL_NAME})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" LIB_NAME ${_SCHEMA_STEM})
+
+    set(_SCHEMA_TEST_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/${_SCHEMA_STEM}/test_${LIB_NAME}.cpp)
+
+    if(EXISTS ${_SCHEMA_TEST_SRC})
+        set(_TEST_TARGET schema_tests_${LIB_NAME})
+        add_executable(${_TEST_TARGET} ${_SCHEMA_TEST_SRC})
+        target_include_directories(${_TEST_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${GENERATED_DIR}
+        )
+        target_link_libraries(${_TEST_TARGET} PRIVATE ${LIB_NAME})
+        add_test(NAME SchemaTests_${LIB_NAME} COMMAND ${_TEST_TARGET})
+        message(STATUS "  Schema test   : ${_TEST_TARGET}")
+    endif()
+endforeach()
+
 # ── Install (optional `cmake --install`) ─────────────────────────────────────
 install(TARGETS asn1_compiler RUNTIME DESTINATION bin)
 install(DIRECTORY ${DIST_INCLUDE_DIR}/ DESTINATION dist/include)

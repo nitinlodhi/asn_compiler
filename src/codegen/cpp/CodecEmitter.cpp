@@ -959,11 +959,28 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         }
     }
 
+    std::string minStr = std::to_string(minSize);
+    std::string maxStr = std::to_string(maxSize);
+    std::string constraintDesc = "[" + minStr + ", " + maxStr + "]";
+
     if (isEncoder) {
-        if (!constrained) {
-            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
+        if (constrained) {
+            if (minSize == maxSize) {
+                code += formatter.formatCode("if (" + varName + ".size() != " + minStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"OCTET STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" != " + minStr + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            } else {
+                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"OCTET STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
+            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
-            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("for (uint8_t byte : " + varName + ") {\n");
         formatter.indent();
@@ -974,7 +991,14 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
-            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
+            if (minSize != maxSize) {
+                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"OCTET STRING SIZE constraint violation: decoded length \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
         }
         code += formatter.formatCode(varName + ".resize(length);\n");
         code += formatter.formatCode("for (size_t i = 0; i < length; ++i) {\n");
@@ -1003,18 +1027,42 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
         }
     }
 
+    std::string minStr = std::to_string(minSize);
+    std::string maxStr = std::to_string(maxSize);
+    std::string constraintDesc = "[" + minStr + ", " + maxStr + "]";
+
     if (isEncoder) {
-        if (!constrained) {
-            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
+        if (constrained) {
+            if (minSize == maxSize) {
+                code += formatter.formatCode("if (" + varName + ".size() != " + minStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"String SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" != " + minStr + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            } else {
+                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"String SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
+            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
-            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("writer.writeBytes(reinterpret_cast<const uint8_t*>(" + varName + ".data()), " + varName + ".size() * 8);\n");
     } else { // Decoder
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
-            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
+            if (minSize != maxSize) {
+                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"String SIZE constraint violation: decoded length \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
         }
         code += formatter.formatCode(varName + ".resize(length);\n");
         code += formatter.formatCode("reader.readBytes(reinterpret_cast<uint8_t*>(" + varName + ".data()), length * 8);\n");
@@ -1036,11 +1084,28 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
         }
     }
 
+    std::string minStr = std::to_string(minSize);
+    std::string maxStr = std::to_string(maxSize);
+    std::string constraintDesc = "[" + minStr + ", " + maxStr + "]";
+
     if (isEncoder) {
-        if (!constrained) {
-            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".bit_length);\n");
+        if (constrained) {
+            if (minSize == maxSize) {
+                code += formatter.formatCode("if (" + varName + ".bit_length != " + minStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"BIT STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".bit_length) + \" != " + minStr + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            } else {
+                code += formatter.formatCode("if (" + varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"BIT STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".bit_length) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
+            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".bit_length, " + minStr + ", " + maxStr + ");\n");
         } else {
-            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".bit_length, " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".bit_length);\n");
         }
         code += formatter.formatCode("writer.writeBytes(" + varName + ".data.data(), " + varName + ".bit_length);\n");
     } else { // Decoder
@@ -1050,7 +1115,16 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
         if (!constrained) {
             code += formatter.formatCode(varName + ".bit_length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
-            code += formatter.formatCode(varName + ".bit_length = UperLength::decodeLength(reader, " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode(varName + ".bit_length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
+            if (minSize != maxSize) {
+                // Fixed-size is always valid by construction; ranged size needs an explicit check
+                // against corrupted streams.
+                code += formatter.formatCode("if (" + varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"BIT STRING SIZE constraint violation: decoded length \" + std::to_string(" + varName + ".bit_length) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
         }
         code += formatter.formatCode("size_t byte_length = (" + varName + ".bit_length + 7) / 8;\n");
         code += formatter.formatCode(varName + ".data.resize(byte_length);\n");
@@ -1128,11 +1202,28 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         }
     }
 
+    std::string minStr = std::to_string(minSize);
+    std::string maxStr = std::to_string(maxSize);
+    std::string constraintDesc = "[" + minStr + ", " + maxStr + "]";
+
     if (isEncoder) {
-        if (!constrained) {
-            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
+        if (constrained) {
+            if (minSize == maxSize) {
+                code += formatter.formatCode("if (" + varName + ".size() != " + minStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"SEQUENCE OF SIZE constraint violation: size \" + std::to_string(" + varName + ".size()) + \" != " + minStr + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            } else {
+                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"SEQUENCE OF SIZE constraint violation: size \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
+            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
-            code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("for (const auto& element : " + varName + ") {\n");
         formatter.indent();
@@ -1143,7 +1234,14 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
-            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + std::to_string(minSize) + ", " + std::to_string(maxSize) + ");\n");
+            code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
+            if (minSize != maxSize) {
+                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"SEQUENCE OF SIZE constraint violation: decoded size \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+            }
         }
         code += formatter.formatCode(varName + ".resize(length);\n");
         code += formatter.formatCode("for (size_t i = 0; i < length; ++i) {\n");
@@ -1165,10 +1263,26 @@ std::string CodecEmitter::generateIntegerLogic(const frontend::AsnNodePtr& node,
         long long minVal = typeInfo->minValue.value();
         long long maxVal = typeInfo->maxValue.value();
         if (maxVal >= minVal) {
+            std::string minStr = std::to_string(minVal) + "LL";
+            std::string maxStr = std::to_string(maxVal) + "LL";
             if (isEncoder) {
-                return formatter.formatCode("UperInteger::encodeConstrainedInt(writer, " + varName + ", " + std::to_string(minVal) + "LL, " + std::to_string(maxVal) + "LL);\n");
+                std::string code;
+                code += formatter.formatCode("if (" + varName + " < " + minStr + " || " + varName + " > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"INTEGER constraint violation: value \" + std::to_string(" + varName + ") + \" out of range [" + std::to_string(minVal) + ", " + std::to_string(maxVal) + "].\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+                code += formatter.formatCode("UperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
+                return code;
             } else {
-                return formatter.formatCode(varName + " = UperInteger::decodeConstrainedInt(reader, " + std::to_string(minVal) + "LL, " + std::to_string(maxVal) + "LL);\n");
+                std::string code;
+                code += formatter.formatCode(varName + " = UperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");
+                code += formatter.formatCode("if (" + varName + " < " + minStr + " || " + varName + " > " + maxStr + ") {\n");
+                formatter.indent();
+                code += formatter.formatCode("throw std::runtime_error(\"INTEGER constraint violation: decoded value \" + std::to_string(" + varName + ") + \" out of range [" + std::to_string(minVal) + ", " + std::to_string(maxVal) + "].\");\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n");
+                return code;
             }
         }
     }
