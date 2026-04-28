@@ -3,4 +3,5 @@
 
 add_subdirectory(core)
 add_subdirectory(uper)
+add_subdirectory(c)
 # add_subdirectory(per)   # uncomment when PER support is added

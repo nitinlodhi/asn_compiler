@@ -11,5 +11,6 @@ target_link_libraries(codegen_base PRIVATE frontend)
 
 # Language-specific backends
 add_subdirectory(cpp)
+add_subdirectory(c)
 # add_subdirectory(java)    # uncomment when Java backend is added
 # add_subdirectory(python)  # uncomment when Python backend is added

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(ASN1Compiler
     VERSION 1.0.0
-    DESCRIPTION "3GPP ASN.1 Parser & UPER/PER Codec (C++)"
-    LANGUAGES CXX
+    DESCRIPTION "3GPP ASN.1 Parser & UPER/PER Codec (C++/C)"
+    LANGUAGES CXX C
 )
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,21 +36,56 @@ target_link_libraries(asn1_compiler PRIVATE
     runtime_uper
     codegen_base
     codegen_cpp
+    codegen_c
     utils_core
     utils_testing
 )
 
-# ── Runtime convenience library (combined, for linking with generated code) ──
+# ── C++ runtime convenience library (combined, for linking with generated C++ code) ──
 add_library(asn1_runtime STATIC
     $<TARGET_OBJECTS:runtime_core>
     $<TARGET_OBJECTS:runtime_uper>
 )
 target_include_directories(asn1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# ── ASN.1 schemas → generated headers + static libraries ────────────────────
+# ── ASN.1 schemas list (shared by C++ and C build rules) ─────────────────────
 set(ASN1_SCHEMAS
     schemas/nr-rrc-15.6.0.asn1
 )
+
+# ── C schemas → generated headers + static C libraries ───────────────────────
+set(GENERATED_C_DIR ${CMAKE_BINARY_DIR}/generated_c)
+file(MAKE_DIRECTORY ${GENERATED_C_DIR})
+
+foreach(SCHEMA ${ASN1_SCHEMAS})
+    get_filename_component(_SCHEMA_FULL_NAME ${SCHEMA} NAME)
+    string(REPLACE ".asn1" "" _SCHEMA_STEM ${_SCHEMA_FULL_NAME})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" LIB_NAME ${_SCHEMA_STEM})
+
+    set(C_LIB_NAME   ${LIB_NAME}_c)
+    set(GEN_C_H      ${GENERATED_C_DIR}/${LIB_NAME}.h)
+    set(GEN_C_SRC    ${GENERATED_C_DIR}/${LIB_NAME}.c)
+
+    add_custom_command(
+        OUTPUT  ${GEN_C_H} ${GEN_C_SRC}
+        COMMAND $<TARGET_FILE:asn1_compiler>
+                ${CMAKE_CURRENT_SOURCE_DIR}/${SCHEMA}
+                -o ${GENERATED_C_DIR}/${LIB_NAME}
+                --lang c
+        DEPENDS asn1_compiler ${CMAKE_CURRENT_SOURCE_DIR}/${SCHEMA}
+        COMMENT "Compiling ASN.1 schema (C): ${SCHEMA}"
+    )
+
+    add_library(${C_LIB_NAME} STATIC ${GEN_C_SRC})
+    set_target_properties(${C_LIB_NAME} PROPERTIES LANGUAGE C C_STANDARD 99)
+    target_include_directories(${C_LIB_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${GENERATED_C_DIR}
+    )
+    target_link_libraries(${C_LIB_NAME} PUBLIC runtime_c)
+endforeach()
+
+# ── ASN.1 schemas → generated C++ headers + static libraries ─────────────────
 
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
@@ -138,6 +173,29 @@ foreach(SCHEMA ${ASN1_SCHEMAS})
         target_link_libraries(${_TEST_TARGET} PRIVATE ${LIB_NAME})
         add_test(NAME SchemaTests_${LIB_NAME} COMMAND ${_TEST_TARGET})
         message(STATUS "  Schema test   : ${_TEST_TARGET}")
+    endif()
+endforeach()
+
+# ── C schema integration tests (one C executable per schema) ─────────────────
+foreach(SCHEMA ${ASN1_SCHEMAS})
+    get_filename_component(_SCHEMA_FULL_NAME ${SCHEMA} NAME)
+    string(REPLACE ".asn1" "" _SCHEMA_STEM ${_SCHEMA_FULL_NAME})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" LIB_NAME ${_SCHEMA_STEM})
+
+    set(_C_TEST_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/${_SCHEMA_STEM}/test_${LIB_NAME}_c.c)
+
+    if(EXISTS ${_C_TEST_SRC})
+        set(_C_TEST_TARGET schema_tests_${LIB_NAME}_c)
+        add_executable(${_C_TEST_TARGET} ${_C_TEST_SRC})
+        set_target_properties(${_C_TEST_TARGET} PROPERTIES LANGUAGE C C_STANDARD 99)
+        target_include_directories(${_C_TEST_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${GENERATED_C_DIR}
+        )
+        target_link_libraries(${_C_TEST_TARGET} PRIVATE ${LIB_NAME}_c)
+        add_test(NAME SchemaTests_${LIB_NAME}_c COMMAND ${_C_TEST_TARGET})
+        message(STATUS "  C schema test : ${_C_TEST_TARGET}")
     endif()
 endforeach()
 

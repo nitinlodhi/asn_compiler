@@ -14,15 +14,18 @@ adding new features.
 3. [Frontend: Parser](#3-frontend-parser)
 4. [Frontend: Symbol Table & Resolver](#4-frontend-symbol-table--resolver)
 5. [Frontend: Constraint Resolver](#5-frontend-constraint-resolver)
-6. [Runtime: Core (BitStream)](#6-runtime-core-bitstream)
-7. [Runtime: UPER Codecs](#7-runtime-uper-codecs)
-8. [Codegen: TypeMap & Formatter](#8-codegen-typemap--formatter)
-9. [Codegen: CppEmitter](#9-codegen-cppemitter)
-10. [Codegen: CodecEmitter](#10-codegen-codecemitter)
-11. [Utils: CLI Driver](#11-utils-cli-driver)
-12. [Key Data Structures](#12-key-data-structures)
-13. [ASN.1 Features Supported](#13-asn1-features-supported)
-14. [Known Limitations](#14-known-limitations)
+6. [Runtime: Core (BitStream, C++)](#6-runtime-core-bitstream-c)
+7. [Runtime: UPER Codecs (C++)](#7-runtime-uper-codecs-c)
+8. [Runtime: C99 Runtime](#8-runtime-c99-runtime)
+9. [Codegen: TypeMap & Formatter](#9-codegen-typemap--formatter)
+10. [Codegen: CppEmitter (C++ types)](#10-codegen-cppemitter-c-types)
+11. [Codegen: CodecEmitter (C++ codecs)](#11-codegen-codecemitter-c-codecs)
+12. [Codegen: CEmitter (C99 types)](#12-codegen-cemitter-c99-types)
+13. [Codegen: CCodecEmitter (C99 codecs)](#13-codegen-ccodechemitter-c99-codecs)
+14. [Utils: CLI Driver](#14-utils-cli-driver)
+15. [Key Data Structures](#15-key-data-structures)
+16. [ASN.1 Features Supported](#16-asn1-features-supported)
+17. [Known Limitations](#17-known-limitations)
 
 ---
 
@@ -41,19 +44,30 @@ AsnParser         src/frontend/AsnParser.cpp
 SymbolTable       src/frontend/SymbolTable.cpp
     │  all modules registered; resolves cross-references, open types, tagging
     ▼
-  ┌─ for each module ──────────────────────────────────────┐
-  │ CppEmitter      src/codegen/cpp/CppEmitter.cpp         │
-  │   traverses resolved AST → .h types inside namespace   │
-  │ CodecEmitter    src/codegen/cpp/CodecEmitter.cpp        │
-  │   traverses resolved AST → .cpp encode_/decode_ funcs  │
-  └────────────────────────────────────────────────────────┘
+    ├─── --lang cpp (default) ─────────────────────────────────────────────┐
+    │  ┌─ for each module ─────────────────────────────────────────────┐   │
+    │  │ CppEmitter    src/codegen/cpp/CppEmitter.cpp                  │   │
+    │  │   AST → .h types inside namespace                             │   │
+    │  │ CodecEmitter  src/codegen/cpp/CodecEmitter.cpp                │   │
+    │  │   AST → .cpp  encode_/decode_  functions                      │   │
+    │  └────────────────────────────────────────────────────────────────┘   │
+    │  Output: <prefix>.h + <prefix>.cpp  (one namespace per module)        │
+    └───────────────────────────────────────────────────────────────────────┘
     │
-    ▼
-.h + .cpp files  (one namespace per module)
+    └─── --lang c ──────────────────────────────────────────────────────────┐
+       ┌─ for each module ──────────────────────────────────────────────┐   │
+       │ CEmitter      src/codegen/c/CEmitter.cpp                       │   │
+       │   AST → .h  typedef struct/enum/union                          │   │
+       │ CCodecEmitter src/codegen/c/CCodecEmitter.cpp                  │   │
+       │   AST → .c   encode_/decode_  functions                        │   │
+       └────────────────────────────────────────────────────────────────┘   │
+       Output: <prefix>.h + <prefix>.c  (ModuleName_ prefix per type)       │
+       └───────────────────────────────────────────────────────────────────┘
 ```
 
 The `CompilerMain.cpp` entry point wires these stages together, driven by the
-`FileLoader` and `Logger` utilities.
+`FileLoader` and `Logger` utilities. The `--lang` flag selects the backend after
+the frontend (lexer → parser → resolver) runs identically for both targets.
 
 ---
 
@@ -279,7 +293,7 @@ After resolution, for modules with `AUTOMATIC TAGS`:
 
 `ConstraintResolver::resolveConstraints(typeNode, table, moduleName)` returns
 an `AsnTypeInfo` describing the min/max integer range, bit width, and size
-constraints for a type. It is used by the codec emitter to determine encoding
+constraints for a type. It is used by the codec emitters to determine encoding
 parameters.
 
 The resolver walks the constraint children of a type node:
@@ -300,7 +314,7 @@ represent a constrained integer range: `ceil(log2(max - min + 1))`.
 
 ---
 
-## 6. Runtime: Core (BitStream)
+## 6. Runtime: Core (BitStream, C++)
 
 **Files:** `src/runtime/core/`, `include/runtime/core/`
 
@@ -334,13 +348,13 @@ operations used by the UPER integer codec.
 ### Supporting types
 
 - `BitString.h`: wrapper holding a bit buffer and bit length; used for
-  ASN.1 BIT STRING members in generated structs.
+  ASN.1 BIT STRING members in C++ generated structs.
 - `ExtensionValue.h`: `std::any`-based container for open-type values.
 - `ObjectIdentifier.h`: thin wrapper around `vector<uint32_t>` for OID arcs.
 
 ---
 
-## 7. Runtime: UPER Codecs
+## 7. Runtime: UPER Codecs (C++)
 
 **Files:** `src/runtime/uper/`, `include/runtime/uper/`
 
@@ -391,12 +405,68 @@ Encode/decode OID arc lists and IEEE 754 REAL values respectively.
 ### RangeUtils
 
 `extractRange(constraintNode)` inspects an ASN.1 constraint node and returns
-`{min, max}` as `optional<long long>` pair. Used by `CodecEmitter` at
+`{min, max}` as `optional<long long>` pair. Used by codec emitters at
 code-generation time (not at runtime).
 
 ---
 
-## 8. Codegen: TypeMap & Formatter
+## 8. Runtime: C99 Runtime
+
+**Files:** `src/runtime/c/asn1_bitwriter.c`, `src/runtime/c/asn1_bitreader.c`,
+`src/runtime/c/asn1_uper.c`  
+**Headers:** `include/runtime/c/asn1_bitwriter.h`, `include/runtime/c/asn1_bitreader.h`,
+`include/runtime/c/asn1_uper.h`
+
+The C99 runtime is a thin C translation of the C++ runtime. Generated C code
+includes these headers transitively through the generated `<schema>.h`.
+
+### Asn1BitWriter
+
+```c
+typedef struct {
+    uint8_t* buffer;   /* heap-allocated, grown on demand */
+    size_t   capacity;
+    size_t   bit_offset;
+} Asn1BitWriter;
+
+void           asn1_bw_init(Asn1BitWriter* bw);        /* alloc + zero */
+void           asn1_bw_free(Asn1BitWriter* bw);        /* free buffer  */
+void           asn1_bw_write_bits(Asn1BitWriter*, uint64_t value, int n);
+void           asn1_bw_write_byte(Asn1BitWriter*, uint8_t value);
+void           asn1_bw_write_bytes(Asn1BitWriter*, const uint8_t*, size_t n_bits);
+void           asn1_bw_align_to_octet(Asn1BitWriter*);
+const uint8_t* asn1_bw_get_buffer(const Asn1BitWriter*);
+size_t         asn1_bw_get_buffer_size(const Asn1BitWriter*); /* bytes  */
+size_t         asn1_bw_get_bit_offset(const Asn1BitWriter*);  /* bits   */
+```
+
+### Asn1BitReader
+
+```c
+typedef struct {
+    const uint8_t* buffer;
+    size_t         buffer_size; /* bytes */
+    size_t         bit_offset;
+} Asn1BitReader;
+
+void     asn1_br_init(Asn1BitReader*, const uint8_t*, size_t size);
+uint64_t asn1_br_read_bits(Asn1BitReader*, int n);
+uint8_t  asn1_br_read_byte(Asn1BitReader*);
+void     asn1_br_read_bytes(Asn1BitReader*, uint8_t* dest, size_t n_bits);
+void     asn1_br_align_to_octet(Asn1BitReader*);
+void     asn1_br_skip(Asn1BitReader*, int n);
+size_t   asn1_br_get_bit_offset(const Asn1BitReader*);
+int      asn1_br_is_at_end(const Asn1BitReader*);
+```
+
+### asn1_uper.h
+
+Mirrors the C++ UPER helpers — constrained integer encode/decode, length
+determinant, choice index, optional bitmap, extension bit.
+
+---
+
+## 9. Codegen: TypeMap & Formatter
 
 **Files:** `src/codegen/TypeMap.cpp`, `include/codegen/TypeMap.h`,
 `src/codegen/Formatter.cpp`
@@ -437,7 +507,7 @@ for boilerplate (function signatures, namespace wrappers).
 
 ---
 
-## 9. Codegen: CppEmitter
+## 10. Codegen: CppEmitter (C++ types)
 
 **Files:** `src/codegen/cpp/CppEmitter.cpp`, `include/codegen/cpp/CppEmitter.h`
 
@@ -462,20 +532,13 @@ inline nested types that must appear *before* the struct:
 - Inline `CHOICE` member type → emits a `std::variant` typedef named
   `<memberName>_type`.
 - Inline `SEQUENCE` member type → emits a forward `struct <memberName>_type`.
-- Inline `SEQUENCE_OF` or `SET_OF` member whose element is an inline `CHOICE`
+- Inline `SEQUENCE_OF` or `SET_OF` whose element is an inline `CHOICE`
   or `SEQUENCE` → emits the element type first, then a `vector<>` alias.
 
-This ordering ensures the struct body can reference all nested types by name.
-
 **Second pass**: emits the struct body, mapping each member's effective type
-to a C++ field declaration. The "effective type" is found by:
-1. If the member has a `resolvedTypeNode`, use it.
-2. Otherwise use the direct child type node.
-
-For optional members, the field is wrapped in `std::optional<>`.
-For members with a default value, the field is given a C++ default initialiser.
-
-Extension members (after `...`) are wrapped in `std::optional<>` by convention.
+to a C++ field declaration. For optional members, the field is wrapped in
+`std::optional<>`. Extension members (after `...`) are wrapped in
+`std::optional<>` by convention.
 
 ### `emitChoice` — `std::variant`
 
@@ -488,17 +551,12 @@ themselves inline types are recursively emitted before the variant typedef.
 1. If the element node has `resolvedName`, use `TypeMap::resolvedNameToCppRef`.
 2. If the element is an inline `CHOICE`, emit a named `_element` alias via
    `emitChoice`, then use that name.
-3. If the element is an inline `SEQUENCE`, emit a nested struct via `emitStruct`,
-   then use that name.
-4. Otherwise fall back to `TypeMap::mapAsnToCppType`. If that returns a
-   structural type keyword (`struct`, `enum`, `std::variant`, `std::vector`),
-   substitute `uint8_t` as a safe fallback.
-
-The final line is `using <MangledName> = std::vector<<ElementTypeName>>;`.
+3. If the element is an inline `SEQUENCE`, emit a nested struct via `emitStruct`.
+4. Otherwise fall back to `TypeMap::mapAsnToCppType`.
 
 ---
 
-## 10. Codegen: CodecEmitter
+## 11. Codegen: CodecEmitter (C++ codecs)
 
 **Files:** `src/codegen/cpp/CodecEmitter.cpp`,
 `include/codegen/cpp/CodecEmitter.h`
@@ -548,8 +606,6 @@ switch (value.index()) {
   ...
 }
 ```
-The variant alternative's field in `std::get<>` uses `safeId()` to escape C++
-keywords (e.g., `explicit` → `explicit_`).
 
 **Decoder:**
 ```cpp
@@ -560,67 +616,154 @@ switch (idx) {
 }
 ```
 
-### `generateSequenceOfLogic`
-
-**Encoder:**
-```cpp
-encodeLength(writer, value.size());
-for (const auto& item : value) { encode_Element(writer, item); }
-```
-
-**Decoder:**
-```cpp
-auto len = decodeLength(reader);
-for (size_t i = 0; i < len; i++) { result.push_back(decode_Element(reader)); }
-```
-
-### `generateMemberCodecCall`
-
-This helper resolves the codec function name for a single member:
-1. If the member's type node has `resolvedName`, use `encode_<ResolvedMangledName>`.
-2. Otherwise dispatch on `NodeType` to inline the primitive codec call.
-3. For OPTIONAL members, wrap in `if (value.<field>.has_value())` (encoder) or
-   assign to `result.<field>` only when the optional bitmap bit is set (decoder).
-
 ### Cycle / recursion detection
 
 Both emitters maintain a `recursion_depth` counter and a `processingNodes`
-set keyed on type names. Self-referential types (linked lists, trees) are
-detected and generate a forward declaration + pointer-based field rather than
-infinite recursion.
+set keyed on type names. Self-referential types are detected and generate a
+forward declaration + pointer-based field rather than infinite recursion.
 
 ---
 
-## 11. Utils: CLI Driver
+## 12. Codegen: CEmitter (C99 types)
+
+**Files:** `src/codegen/c/CEmitter.cpp`, `include/codegen/c/CEmitter.h`
+
+`CEmitter` produces the `.h` file for the C99 backend. It is structurally
+analogous to `CppEmitter` but generates C99 constructs instead of C++20 ones.
+
+### Naming convention
+
+Because C has no namespaces, all generated names include the module prefix:
+
+```
+ModuleName_TypeName           typedef struct/enum/union name
+ModuleName_TypeName_field_type  inline nested type for struct field
+```
+
+`cName(module, name)` produces the prefixed identifier.
+`cRef(qualifiedName, currentModule)` converts `"ModuleName.TypeName"` to
+`"ModuleName_TypeName"`.
+
+### Type mappings (ASN.1 → C99)
+
+| ASN.1 | C99 |
+|---|---|
+| INTEGER (constrained) | `uint8_t` / `uint16_t` / `uint32_t` / `int64_t` |
+| INTEGER (unconstrained) | `int64_t` |
+| BOOLEAN | `int` (0/1) |
+| OCTET STRING | `struct { uint8_t* data; size_t length; }` (heap-owned) |
+| BIT STRING | `struct { uint8_t* data; size_t length; }` (length = bits) |
+| NULL | `int` (placeholder, always 0) |
+| REAL | `double` |
+| UTF8String / … | `char*` |
+| ENUMERATED | `typedef enum { … } TypeName;` |
+| SEQUENCE | `typedef struct { … } TypeName;` |
+| SEQUENCE OF / SET OF | array struct `{ TypeName* items; size_t count; }` |
+| CHOICE | `int tag` + union |
+
+### Optional fields
+
+OPTIONAL fields are represented with an `int has_<field>` sentinel alongside
+the value field. There is no `NULL` pointer dereference risk as long as callers
+check the flag.
+
+### Parameterized type instantiations
+
+The C backend cannot reference parameterized template types (e.g.,
+`SetupRelease { SomeType }`) by name because templates are not emitted — only
+concrete instantiations are. When `cTypeFor` encounters a field whose resolved
+name points to a parameterized template:
+
+1. It detects that `sym->isParameterized` is true.
+2. It calls `emitStruct` / `emitChoice` inline on the resolved type body.
+3. It assigns a deterministic name: `ModuleName_ParentTypeName_fieldName_type`.
+4. The inline definition is prepended to the parent struct via `pre_emit`.
+
+This means each instantiation site emits its own anonymous named type. The
+pattern is invisible to users of the generated header — they see a concrete
+struct/union.
+
+---
+
+## 13. Codegen: CCodecEmitter (C99 codecs)
+
+**Files:** `src/codegen/c/CCodecEmitter.cpp`, `include/codegen/c/CCodecEmitter.h`
+
+`CCodecEmitter` produces the `.c` file. For each top-level, non-parameterized
+assignment it emits:
+
+```c
+int ModuleName_encode_TypeName(Asn1BitWriter* bw, const ModuleName_TypeName* val,
+                               char* err_buf, size_t err_buf_size);
+int ModuleName_decode_TypeName(Asn1BitReader* br, ModuleName_TypeName* out,
+                               char* err_buf, size_t err_buf_size);
+```
+
+Return value: `0` on success, non-zero on error (with a message in `err_buf`).
+
+### Dispatch
+
+Same node-type dispatch as `CodecEmitter` but calls `asn1_uper_*` C functions
+from `asn1_uper.h` instead of C++ UPER helpers.
+
+### Parameterized-type fields
+
+Fields typed with a parameterized template (e.g., `SetupRelease { X }`) have
+their resolved name pointing to a template. The helper `isParameterizedRef`
+detects this case and emits a `/* TODO: encode/decode … */` stub instead of
+calling a nonexistent codec function. This is safe for schema types that do not
+appear in the integration tests; a future improvement is to inline the
+substituted codec logic.
+
+```cpp
+static bool isParameterizedRef(const frontend::SymbolTable* table,
+                                const std::string& resolved_name) {
+    auto dot = resolved_name.find('.');
+    if (dot == std::string::npos) return false;
+    auto sym = table->lookupSymbol(resolved_name.substr(0, dot),
+                                   resolved_name.substr(dot + 1));
+    return sym && sym->isParameterized;
+}
+```
+
+---
+
+## 14. Utils: CLI Driver
 
 **Files:** `src/utils/CompilerMain.cpp`, `src/utils/FileLoader.cpp`,
 `src/utils/Logger.cpp`
 
 `CompilerMain.cpp::main()`:
-1. Parses arguments: `<input.asn1>`, `-o <prefix>`, `-v`.
+1. Parses arguments: `<input.asn1>`, `-o <prefix>`, `--lang <c|cpp>`, `-v`.
 2. `FileLoader::loadFile(path)` → `std::string source`.
 3. Lex → `AsnLexer(source).tokenize()`.
 4. Parse → `AsnParser(tokens).parseAll()` → `vector<AsnNodePtr>`, one element
    per `DEFINITIONS … BEGIN … END` block in the file.
 5. For each module AST: register all its ASSIGNMENT symbols in the global
-   `SymbolTable`; queue any imported module file paths for subsequent parsing
-   (multi-file IMPORTS support).
+   `SymbolTable`.
 6. Call `globalSymbolTable.resolveReferences(all_asts)` — resolves all modules
    in one pass so cross-module references work.
+
+**C++ backend** (default / `--lang cpp`):
 7. Emit shared `#ifndef` guard and outer namespace open.
-8. For each module AST: open a nested `namespace <ModuleName>`, topologically
-   sort its assignments, call `CppEmitter` and `CodecEmitter` for each
-   assignment, close the namespace. Each module's types and codec functions are
-   thus isolated in their own namespace.
-9. `FileLoader::writeFile(prefix + ".h", header)`,
-   `FileLoader::writeFile(prefix + ".cpp", source)`.
+8. For each module AST: topologically sort assignments, skip parameterized
+   ones (`node->isParameterized`), open a nested `namespace <ModuleName>`,
+   call `CppEmitter` and `CodecEmitter`, close the namespace.
+9. Write `<prefix>.h` and `<prefix>.cpp`.
+
+**C backend** (`--lang c`):
+7. Emit `#ifndef` guard and C runtime `#include`s.
+8. For each module AST: topologically sort assignments, skip parameterized
+   ones (`node->isParameterized`), call `CEmitter` (types into `.h`) and
+   `CCodecEmitter` (codecs into `.c`).
+9. Write `<prefix>.h` (all module types) and `<prefix>.c` (all codec functions).
 
 `Logger` provides `Logger::debug(msg)`, `Logger::info(msg)`, `Logger::error(msg)`
 with compile-time level filtering. Verbose mode (`-v`) enables DEBUG level.
 
 ---
 
-## 12. Key Data Structures
+## 15. Key Data Structures
 
 ### `AsnNode`
 
@@ -654,7 +797,7 @@ Children layout varies by node type:
 
 ### `AsnTypeInfo`
 
-Result of `ConstraintResolver`. Used by `CodecEmitter` to select the right
+Result of `ConstraintResolver`. Used by codec emitters to select the right
 UPER encoding call.
 
 ```
@@ -669,69 +812,74 @@ AsnTypeInfo {
 
 ---
 
-## 13. ASN.1 Features Supported
+## 16. ASN.1 Features Supported
 
-| Feature | Status |
-|---|---|
-| SEQUENCE, SET | Supported |
-| SEQUENCE OF, SET OF | Supported |
-| CHOICE | Supported |
-| ENUMERATED | Supported |
-| INTEGER (constrained + unconstrained) | Supported |
-| BOOLEAN | Supported |
-| OCTET STRING | Supported |
-| BIT STRING | Supported |
-| OBJECT IDENTIFIER | Supported |
-| REAL | Supported |
-| NULL | Supported |
-| UTF8String / PrintableString / VisibleString / IA5String / NumericString | Supported (as `std::string`) |
-| OPTIONAL members | Supported |
-| DEFAULT values | Supported (field initializer) |
-| Extension markers (`...`) | Supported (extension bit) |
-| Constraints: range (`0..255`) | Supported |
-| Constraints: SIZE | Supported |
-| Constraints: value reference | Supported |
-| Constraints: WITH COMPONENTS | Supported (synthesised filtered SEQUENCE) |
-| Constraints: CONTAINING | Parsed, not yet used in codegen |
-| Multiple modules in one file | Supported — each gets its own C++ namespace |
-| IMPORTS within the same file | Supported — cross-module references resolved |
-| IMPORTS across separate files | CLI queues imported files; partial support |
-| Value assignments (`x INTEGER ::= 42`) | Supported |
-| CLASS definitions + object sets | Parsed + resolved |
-| Open types (ANY DEFINED BY) | Resolved (openTypeMap populated) |
-| Parameterized open types (`CLASS.&Type({set}{@id})`) | Resolved |
-| Parameterized type definitions | Supported (substitution at usage site) |
-| Explicit / implicit tagging | Parsed + stored |
-| AUTOMATIC TAGS | Post-pass assigns sequential tags |
-| Tag-based codec dispatch | Not yet generated (codegen uses structural dispatch) |
+| Feature | C++ | C99 |
+|---|---|---|
+| SEQUENCE, SET | Supported | Supported |
+| SEQUENCE OF, SET OF | Supported | Supported |
+| CHOICE | Supported | Supported |
+| ENUMERATED | Supported | Supported |
+| INTEGER (constrained + unconstrained) | Supported | Supported |
+| BOOLEAN | Supported | Supported |
+| OCTET STRING | Supported | Supported |
+| BIT STRING | Supported | Supported |
+| OBJECT IDENTIFIER | Supported | Supported |
+| REAL | Supported | Supported |
+| NULL | Supported | Supported |
+| UTF8String / PrintableString / VisibleString / … | Supported | Supported |
+| OPTIONAL members | Supported (`std::optional`) | Supported (`has_` flag) |
+| DEFAULT values | Supported (field initialiser) | Supported (zero init) |
+| Extension markers (`...`) | Supported | Supported |
+| Constraints: range (`0..255`) | Supported | Supported |
+| Constraints: SIZE | Supported | Supported |
+| Constraints: value reference | Supported | Supported |
+| Constraints: WITH COMPONENTS | Supported | Supported |
+| Constraints: CONTAINING | Parsed, not used in codegen | Parsed, not used |
+| Multiple modules in one file | Supported (namespaces) | Supported (prefixes) |
+| IMPORTS within the same file | Supported | Supported |
+| IMPORTS across separate files | Partial | Partial |
+| Value assignments (`x INTEGER ::= 42`) | Supported | Supported |
+| CLASS definitions + object sets | Parsed + resolved | Parsed + resolved |
+| Open types (ANY DEFINED BY) | Resolved | Resolved |
+| Parameterized type definitions | Instantiated at usage | Instantiated inline |
+| Parameterized field codecs | Supported | TODO stub |
+| Explicit / implicit tagging | Parsed + stored | Parsed + stored |
+| AUTOMATIC TAGS | Post-pass assigns tags | Post-pass assigns tags |
 
 ---
 
-## 14. Known Limitations
+## 17. Known Limitations
 
-**Multiple modules in one file**: fully supported. `AsnParser::parseAll()` reads every `DEFINITIONS … BEGIN … END` block in the file. Each module is resolved with awareness of the others' symbols, and each gets its own nested C++ namespace in the output (`namespace NR_RRC_Definitions { … }`, `namespace NR_UE_Variables { … }`, etc.). Cross-module `IMPORTS` within the same file are resolved correctly; imported value constants (e.g., `maxNrofCellMeas`) are looked up via `resolvedName` when not present in the importing module's local symbol table.
+**Parameterized field codecs (C backend)**: fields typed with a parameterized
+template (e.g., `SetupRelease { X }`) emit a `/* TODO */` stub in the C codec.
+The C type definition is emitted correctly as an inline instantiation; only the
+encode/decode body is missing. None of the current integration tests exercise
+these paths so all 49 C tests pass. A correct implementation would inline the
+substituted codec logic at the call site.
 
-**Multiple-file compilation**: schemas that `IMPORTS` from a *separate* `.asn1` file rely on `FileLoader::findModuleFile` locating that file on disk. If the file cannot be found a warning is emitted but compilation continues. Full separate-file compilation requires providing include paths via the CLI or invoking the compiler with all files pre-loaded.
+**Multiple-file compilation**: schemas that `IMPORTS` from a *separate* `.asn1`
+file rely on `FileLoader::findModuleFile` locating that file on disk. If the
+file cannot be found a warning is emitted but compilation continues. Full
+separate-file compilation requires providing include paths via the CLI or
+invoking the compiler with all files pre-loaded.
 
 **Tag-based codec**: generated encode/decode functions use structural
 (member-order) dispatch rather than BER/DER/CER tag-based dispatch. This is
 correct for UPER (which ignores tags) but means the runtime cannot be used for
 BER.
 
-**PER aligned / BER / DER**: only UPER is implemented. The `runtime/per/`
-directory is a placeholder.
+**PER aligned / BER / DER**: only UPER is implemented.
 
 **Open type encoding**: `openTypeMap` is populated by the resolver but the
-codec emitter does not yet emit switch-based dispatch over `openTypeMap` entries.
+codec emitters do not yet emit switch-based dispatch over `openTypeMap` entries.
 `ANY DEFINED BY` members encode as raw bytes.
 
 **Fragmented lengths**: `UperLength` handles fragmentation on decode, but the
 generated codec loops do not yet call the fragmented form repeatedly for very
 large SEQUENCE OF values (>16K elements).
 
-**REAL encoding**: uses IEEE 754 double wrapped as an OCTET STRING, which is the
-most common 3GPP practice. Full ASN.1 REAL decimal / special value encoding is
-not implemented.
+**REAL encoding**: uses IEEE 754 double wrapped as an OCTET STRING.
 
 **Error recovery**: the parser throws on the first syntax error. There is no
 panic-mode recovery or multi-error accumulation.

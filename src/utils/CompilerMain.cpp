@@ -12,6 +12,8 @@
 #include "frontend/AsnParser.h"
 #include "codegen/cpp/CppEmitter.h"
 #include "codegen/cpp/CodecEmitter.h"
+#include "codegen/c/CEmitter.h"
+#include "codegen/c/CCodecEmitter.h"
 #include "codegen/TypeMap.h"
 #include "frontend/SymbolTable.h"
 #include "frontend/ConstraintResolver.h"
@@ -21,10 +23,12 @@ using namespace asn1;
 void printUsage(const char* programName) {
     std::cout << "Usage: " << programName << " [options] <input.asn1>\n"
               << "Options:\n"
-              << "  -o, --output <base>   Output C++ base name (default: output)\n"
-              << "                        Generates <base>.h and <base>.cpp\n"
+              << "  -o, --output <base>   Output base name (default: output)\n"
+              << "                        C++: generates <base>.h and <base>.cpp\n"
+              << "                        C  : generates <base>.h and <base>.c\n"
               << "  -I <path>             Add a directory to the search path for imports\n"
               << "  -n, --namespace <ns>  C++ namespace (default: asn1::generated)\n"
+              << "  --lang <cpp|c>        Output language (default: cpp)\n"
               << "  --test                Run validation tests\n"
               << "  -v, --verbose         Enable verbose output\n"
               << "  -h, --help            Show this help message\n";
@@ -148,6 +152,7 @@ int main(int argc, char* argv[]) {
     std::string inputFile;
     std::string outputBaseName = "output";
     std::string outputNamespace = "asn1::generated";
+    std::string outputLang = "cpp";
     bool runTests = false;
     bool verbose = false;
     std::vector<std::string> includePaths;
@@ -169,12 +174,14 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "-n" || arg == "--namespace") {
             if (i + 1 < argc) outputNamespace = argv[++i];
+        } else if (arg == "--lang") {
+            if (i + 1 < argc) outputLang = argv[++i];
         } else if (arg == "-I") {
             if (i + 1 < argc) includePaths.push_back(argv[++i]);
         } else if (arg == "--test") {
             runTests = true;
         } else if (arg == "-v" || arg == "--verbose") {
-            verbose = true;
+            verbose = true; (void)verbose;
             utils::Logger::setLogLevel(utils::LogLevel::DEBUG);
         } else if (arg[0] != '-') {
             inputFile = arg;
@@ -199,7 +206,7 @@ int main(int argc, char* argv[]) {
     headerGuard = "ASN1_GENERATED_" + headerGuard + "_H";
 
     std::string headerOutputFile = outputBaseName + ".h";
-    std::string sourceOutputFile = outputBaseName + ".cpp";
+    std::string sourceOutputFile = outputBaseName + (outputLang == "c" ? ".c" : ".cpp");
 
     try {
         utils::Logger::info("Building symbol table...");
@@ -263,113 +270,211 @@ int main(int argc, char* argv[]) {
         globalSymbolTable.resolveReferences(all_asts);
         utils::Logger::info("Reference resolution complete.");
 
-        utils::Logger::info("Starting code generation...");
+        utils::Logger::info("Starting code generation (lang=" + outputLang + ")...");
 
         std::string generatedHeaderCode;
         std::string generatedSourceCode;
 
-        codegen::CppEmitter emitter;
-        emitter.setOutputNamespace(outputNamespace);
-        codegen::CodecEmitter codec_emitter;
+        if (outputLang == "c") {
+            // ── C backend ────────────────────────────────────────────────────
+            codegen::CEmitter c_emitter;
+            codegen::CCodecEmitter c_codec;
 
-        generatedHeaderCode += emitter.emitHeaderPreamble(headerGuard);
-        generatedHeaderCode += "namespace " + outputNamespace + " {\n\n";
+            generatedHeaderCode += c_emitter.emitHeaderPreamble(headerGuard);
 
-        generatedSourceCode += emitter.emitSourcePreamble(headerOutputFile);
-        generatedSourceCode += "namespace " + outputNamespace + " {\n\n";
+            // .c source includes the generated header + C runtime
+            generatedSourceCode += "#include \"" + headerOutputFile.substr(
+                headerOutputFile.find_last_of("/\\") == std::string::npos ? 0
+                    : headerOutputFile.find_last_of("/\\") + 1) + "\"\n";
+            generatedSourceCode += "#include \"runtime/c/asn1_uper.h\"\n";
+            generatedSourceCode += "#include <stdlib.h>\n";
+            generatedSourceCode += "#include <string.h>\n";
+            generatedSourceCode += "#include <stdio.h>\n\n";
 
-        // Process every module in the file, each in its own nested namespace.
-        for (const auto& module_ast : all_asts) {
-            if (!module_ast || module_ast->type != frontend::NodeType::MODULE) continue;
+            for (const auto& module_ast : all_asts) {
+                if (!module_ast || module_ast->type != frontend::NodeType::MODULE) continue;
+                utils::Logger::info("Generating C code for module: " + module_ast->name);
 
-            std::string moduleNamespace = codegen::TypeMap::mangleName(module_ast->name);
-            utils::Logger::info("Generating code for module: " + module_ast->name);
+                std::vector<frontend::AsnNodePtr> all_assignments;
+                for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
+                    auto node = module_ast->getChild(i);
+                    if (node && node->type == frontend::NodeType::ASSIGNMENT &&
+                        node->getChildCount() > 0)
+                        all_assignments.push_back(node);
+                }
+                auto sorted_assignments = topoSortAssignments(all_assignments);
 
-            // Collect and topologically sort assignments for this module.
-            std::vector<frontend::AsnNodePtr> all_assignments;
-            for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
-                auto node = module_ast->getChild(i);
-                if (node && node->type == frontend::NodeType::ASSIGNMENT &&
-                    node->getChildCount() > 0)
-                    all_assignments.push_back(node);
-            }
-            auto sorted_assignments = topoSortAssignments(all_assignments);
+                c_emitter.setContext(globalSymbolTable, module_ast->name);
+                c_codec.setContext(globalSymbolTable, module_ast->name);
 
-            generatedHeaderCode += "namespace " + moduleNamespace + " {\n\n";
-            generatedSourceCode += "namespace " + moduleNamespace + " {\n\n";
+                // Type definitions in the header
+                for (const auto& node : sorted_assignments) {
+                    if (node->isParameterized) continue; // skip template types; only concrete instantiations are emitted
+                    auto typeDefNode = node->getChild(0);
+                    if (!typeDefNode) continue;
+                    switch (typeDefNode->type) {
+                        case frontend::NodeType::SEQUENCE:
+                        case frontend::NodeType::SET:
+                            generatedHeaderCode += c_emitter.emitStruct(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::SEQUENCE_OF:
+                        case frontend::NodeType::SET_OF:
+                            generatedHeaderCode += c_emitter.emitSequenceOf(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::CHOICE:
+                            generatedHeaderCode += c_emitter.emitChoice(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::ENUMERATION:
+                            generatedHeaderCode += c_emitter.emitEnum(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::INTEGER:
+                        case frontend::NodeType::BOOLEAN:
+                        case frontend::NodeType::OCTET_STRING:
+                        case frontend::NodeType::BIT_STRING:
+                        case frontend::NodeType::OBJECT_IDENTIFIER:
+                        case frontend::NodeType::REAL:
+                        case frontend::NodeType::NULL_TYPE:
+                        case frontend::NodeType::UTF8_STRING:
+                        case frontend::NodeType::PRINTABLE_STRING:
+                        case frontend::NodeType::VISIBLE_STRING:
+                        case frontend::NodeType::IA5_STRING:
+                        case frontend::NodeType::NUMERIC_STRING:
+                        case frontend::NodeType::ANY_TYPE:
+                            generatedHeaderCode += c_emitter.emitTypedef(node, module_ast->name);
+                            break;
+                        default:
+                            if (typeDefNode->resolvedName.has_value())
+                                generatedHeaderCode += c_emitter.emitTypedef(node, module_ast->name);
+                            else
+                                utils::Logger::debug("Skipping C type for: " + node->name);
+                            break;
+                    }
+                }
 
-            codec_emitter.setContext(globalSymbolTable, module_ast->name);
+                // VALUE_ASSIGNMENT → #define constants
+                for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
+                    auto node = module_ast->getChild(i);
+                    if (node && node->type == frontend::NodeType::VALUE_ASSIGNMENT)
+                        generatedHeaderCode += c_emitter.emitValueAssignment(node, module_ast->name);
+                }
 
-            // Emit type definitions in dependency order.
-            for (const auto& node : sorted_assignments) {
-                auto typeDefNode = node->getChild(0);
-                if (!typeDefNode) continue;
-                switch (typeDefNode->type) {
-                    case frontend::NodeType::SEQUENCE:
-                    case frontend::NodeType::SET:
-                        generatedHeaderCode += emitter.emitStruct(node, module_ast->name);
-                        break;
-                    case frontend::NodeType::SEQUENCE_OF:
-                    case frontend::NodeType::SET_OF:
-                        generatedHeaderCode += emitter.emitSequenceOf(node, module_ast->name);
-                        break;
-                    case frontend::NodeType::CHOICE:
-                        generatedHeaderCode += emitter.emitChoice(node, module_ast->name);
-                        break;
-                    case frontend::NodeType::ENUMERATION:
-                        generatedHeaderCode += emitter.emitEnum(node, module_ast->name);
-                        break;
-                    case frontend::NodeType::INTEGER:
-                    case frontend::NodeType::BOOLEAN:
-                    case frontend::NodeType::OCTET_STRING:
-                    case frontend::NodeType::BIT_STRING:
-                    case frontend::NodeType::OBJECT_IDENTIFIER:
-                    case frontend::NodeType::REAL:
-                    case frontend::NodeType::NULL_TYPE:
-                    case frontend::NodeType::UTF8_STRING:
-                    case frontend::NodeType::PRINTABLE_STRING:
-                    case frontend::NodeType::VISIBLE_STRING:
-                    case frontend::NodeType::IA5_STRING:
-                    case frontend::NodeType::NUMERIC_STRING:
-                    case frontend::NodeType::ANY_TYPE:
-                        generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
-                        break;
-                    default:
-                        if (typeDefNode->resolvedName.has_value()) {
-                            generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
-                        } else {
-                            utils::Logger::debug("Skipping C++ type for: " + node->name);
-                        }
-                        break;
+                // Codec declarations (header) and definitions (source)
+                size_t total = sorted_assignments.size();
+                for (size_t i = 0; i < total; ++i) {
+                    const auto& node = sorted_assignments[i];
+                    if (node->isParameterized) continue;
+                    utils::Logger::info("  - " + node->name + " (" +
+                                        std::to_string(i + 1) + "/" +
+                                        std::to_string(total) + ")");
+                    generatedHeaderCode += c_codec.emitEncoderDeclaration(node, module_ast->name);
+                    generatedHeaderCode += c_codec.emitDecoderDeclaration(node, module_ast->name);
+                    generatedSourceCode += c_codec.emitEncoderDefinition(node, module_ast->name);
+                    generatedSourceCode += c_codec.emitDecoderDefinition(node, module_ast->name);
                 }
             }
 
-            // Emit VALUE_ASSIGNMENT constants.
-            for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
-                auto node = module_ast->getChild(i);
-                if (node && node->type == frontend::NodeType::VALUE_ASSIGNMENT)
-                    generatedHeaderCode += emitter.emitValueAssignment(node, module_ast->name);
+            generatedHeaderCode += c_emitter.emitHeaderEpilogue(headerGuard);
+
+        } else {
+            // ── C++ backend (default) ─────────────────────────────────────────
+            codegen::CppEmitter emitter;
+            emitter.setOutputNamespace(outputNamespace);
+            codegen::CodecEmitter codec_emitter;
+
+            generatedHeaderCode += emitter.emitHeaderPreamble(headerGuard);
+            generatedHeaderCode += "namespace " + outputNamespace + " {\n\n";
+
+            generatedSourceCode += emitter.emitSourcePreamble(headerOutputFile);
+            generatedSourceCode += "namespace " + outputNamespace + " {\n\n";
+
+            for (const auto& module_ast : all_asts) {
+                if (!module_ast || module_ast->type != frontend::NodeType::MODULE) continue;
+
+                std::string moduleNamespace = codegen::TypeMap::mangleName(module_ast->name);
+                utils::Logger::info("Generating C++ code for module: " + module_ast->name);
+
+                std::vector<frontend::AsnNodePtr> all_assignments;
+                for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
+                    auto node = module_ast->getChild(i);
+                    if (node && node->type == frontend::NodeType::ASSIGNMENT &&
+                        node->getChildCount() > 0)
+                        all_assignments.push_back(node);
+                }
+                auto sorted_assignments = topoSortAssignments(all_assignments);
+
+                generatedHeaderCode += "namespace " + moduleNamespace + " {\n\n";
+                generatedSourceCode += "namespace " + moduleNamespace + " {\n\n";
+
+                codec_emitter.setContext(globalSymbolTable, module_ast->name);
+
+                for (const auto& node : sorted_assignments) {
+                    auto typeDefNode = node->getChild(0);
+                    if (!typeDefNode) continue;
+                    switch (typeDefNode->type) {
+                        case frontend::NodeType::SEQUENCE:
+                        case frontend::NodeType::SET:
+                            generatedHeaderCode += emitter.emitStruct(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::SEQUENCE_OF:
+                        case frontend::NodeType::SET_OF:
+                            generatedHeaderCode += emitter.emitSequenceOf(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::CHOICE:
+                            generatedHeaderCode += emitter.emitChoice(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::ENUMERATION:
+                            generatedHeaderCode += emitter.emitEnum(node, module_ast->name);
+                            break;
+                        case frontend::NodeType::INTEGER:
+                        case frontend::NodeType::BOOLEAN:
+                        case frontend::NodeType::OCTET_STRING:
+                        case frontend::NodeType::BIT_STRING:
+                        case frontend::NodeType::OBJECT_IDENTIFIER:
+                        case frontend::NodeType::REAL:
+                        case frontend::NodeType::NULL_TYPE:
+                        case frontend::NodeType::UTF8_STRING:
+                        case frontend::NodeType::PRINTABLE_STRING:
+                        case frontend::NodeType::VISIBLE_STRING:
+                        case frontend::NodeType::IA5_STRING:
+                        case frontend::NodeType::NUMERIC_STRING:
+                        case frontend::NodeType::ANY_TYPE:
+                            generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
+                            break;
+                        default:
+                            if (typeDefNode->resolvedName.has_value()) {
+                                generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
+                            } else {
+                                utils::Logger::debug("Skipping C++ type for: " + node->name);
+                            }
+                            break;
+                    }
+                }
+
+                for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
+                    auto node = module_ast->getChild(i);
+                    if (node && node->type == frontend::NodeType::VALUE_ASSIGNMENT)
+                        generatedHeaderCode += emitter.emitValueAssignment(node, module_ast->name);
+                }
+
+                size_t total = sorted_assignments.size();
+                for (size_t i = 0; i < total; ++i) {
+                    const auto& node = sorted_assignments[i];
+                    utils::Logger::info("  - " + node->name + " (" +
+                                        std::to_string(i + 1) + "/" +
+                                        std::to_string(total) + ")");
+                    generatedHeaderCode += codec_emitter.emitEncoderDeclaration(node, module_ast->name);
+                    generatedHeaderCode += codec_emitter.emitDecoderDeclaration(node, module_ast->name);
+                    generatedSourceCode += codec_emitter.emitEncoderDefinition(node, module_ast->name);
+                    generatedSourceCode += codec_emitter.emitDecoderDefinition(node, module_ast->name);
+                }
+
+                generatedHeaderCode += "\n} // namespace " + moduleNamespace + "\n\n";
+                generatedSourceCode += "} // namespace " + moduleNamespace + "\n\n";
             }
 
-            // Emit codec declarations (header) and definitions (source).
-            size_t total = sorted_assignments.size();
-            for (size_t i = 0; i < total; ++i) {
-                const auto& node = sorted_assignments[i];
-                utils::Logger::info("  - " + node->name + " (" +
-                                    std::to_string(i + 1) + "/" +
-                                    std::to_string(total) + ")");
-                generatedHeaderCode += codec_emitter.emitEncoderDeclaration(node, module_ast->name);
-                generatedHeaderCode += codec_emitter.emitDecoderDeclaration(node, module_ast->name);
-                generatedSourceCode += codec_emitter.emitEncoderDefinition(node, module_ast->name);
-                generatedSourceCode += codec_emitter.emitDecoderDefinition(node, module_ast->name);
-            }
-
-            generatedHeaderCode += "\n} // namespace " + moduleNamespace + "\n\n";
-            generatedSourceCode += "} // namespace " + moduleNamespace + "\n\n";
+            generatedHeaderCode += "} // namespace " + outputNamespace + "\n\n#endif // " + headerGuard + "\n";
+            generatedSourceCode += "} // namespace " + outputNamespace + "\n";
         }
-
-        generatedHeaderCode += "} // namespace " + outputNamespace + "\n\n#endif // " + headerGuard + "\n";
-        generatedSourceCode += "} // namespace " + outputNamespace + "\n";
 
         utils::Logger::info("Writing output to: " + headerOutputFile +
                             " and " + sourceOutputFile);
