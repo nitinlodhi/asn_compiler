@@ -198,6 +198,16 @@ std::string CEmitter::cTypeFor(const AsnNodePtr& member_node,
             // Prefer the resolved fully-qualified name so the module prefix is included.
             if (eff->resolvedName.has_value())
                 return cRef(eff->resolvedName.value(), module_name);
+            // No resolvedName: check if the bare name is a real symbol.
+            // If not (e.g. it's a formal type parameter like ElementTypeParam), use a placeholder.
+            if (symbol_table) {
+                auto sym = symbol_table->lookupSymbol(module_name, eff->name);
+                if (!sym) {
+                    auto global = symbol_table->findSymbolInAnyModule(eff->name);
+                    if (!global.has_value())
+                        return "uint8_t* /* type parameter */";
+                }
+            }
             return cRef(eff->name, module_name);
         }
         default:

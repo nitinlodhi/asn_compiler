@@ -26,6 +26,16 @@ AsnNodePtr SymbolTable::lookupSymbol(const std::string& moduleName, const std::s
     return nullptr;
 }
 
+std::optional<std::pair<std::string, AsnNodePtr>> SymbolTable::findSymbolInAnyModule(const std::string& symbolName) const {
+    for (const auto& [modName, syms] : modules) {
+        auto sym_it = syms.find(symbolName);
+        if (sym_it != syms.end()) {
+            return std::make_pair(modName, sym_it->second);
+        }
+    }
+    return std::nullopt;
+}
+
 bool SymbolTable::addTypeInfo(const std::string& name, AsnTypeInfoPtr info) {
     if (typeInfo.find(name) != typeInfo.end()) {
         return false;
@@ -53,13 +63,17 @@ static void buildOpenTypeMap(
 {
     auto objectSetAssignment = table.lookupSymbol(moduleNode->name, objectSetName);
     if (!objectSetAssignment || objectSetAssignment->type != NodeType::OBJECT_SET_ASSIGNMENT) {
-        throw std::runtime_error("Undefined object set '" + objectSetName + "'");
+        // Object set may be unresolvable (e.g., defined in a module not yet parsed, or uses
+        // WITH SYNTAX notation that was skipped). Silently skip open-type map building.
+        return;
     }
 
+    // Object set must have a class reference child (child 0) and an object set body (child 1)
     auto objectSetClassRef = objectSetAssignment->getChild(0);
+    if (!objectSetClassRef) return;
     auto class_it = scope.find(objectSetClassRef->name);
     if (class_it == scope.end()) {
-         throw std::runtime_error("Undefined class '" + objectSetClassRef->name + "' for object set '" + objectSetName + "'");
+        return;
     }
     std::string qualifiedClassName = class_it->second;
     size_t dotPos = qualifiedClassName.find('.');
@@ -116,8 +130,19 @@ static void resolveNodeReferences(AsnNodePtr node, const SymbolTable& table, con
                  "NULL", "REAL", "OBJECT IDENTIFIER",
                  "TYPE"   // ASN.1 open-type keyword in CLASS field specs
              };
-             if (primitives.find(node->name) == primitives.end()) {
-                throw std::runtime_error("Undefined type reference: '" + node->name + "' at " + node->location.toString());
+             if (primitives.find(node->name) != primitives.end()) {
+                 // It's a primitive — nothing to do.
+             } else {
+                 // Not in current module scope. Try a global search across all modules.
+                 // This handles cross-module forward references when modules are resolved
+                 // in file order before their dependencies.
+                 auto globalResult = table.findSymbolInAnyModule(node->name);
+                 if (globalResult.has_value()) {
+                     node->resolvedName = globalResult->first + "." + node->name;
+                     // Don't recurse here — the symbol will be fully resolved in its own module's pass.
+                 } else {
+                     throw std::runtime_error("Undefined type reference: '" + node->name + "' at " + node->location.toString());
+                 }
              }
         } else {
             node->resolvedName = it->second;

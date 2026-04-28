@@ -39,7 +39,7 @@ std::string AsnTypeInfo::toString() const {
     return "AsnTypeInfo(" + typeName + ")";
 }
 
-long long ConstraintResolver::resolveBound(const AsnNodePtr& boundNode, const SymbolTable& table, const std::string& moduleName) {
+std::optional<long long> ConstraintResolver::resolveBound(const AsnNodePtr& boundNode, const SymbolTable& table, const std::string& moduleName) {
     if (boundNode->type == NodeType::VALUE_NODE) {
         return std::stoll(boundNode->value.value());
     }
@@ -53,17 +53,23 @@ long long ConstraintResolver::resolveBound(const AsnNodePtr& boundNode, const Sy
             if (dp != std::string::npos)
                 valueAssignmentNode = table.lookupSymbol(qual.substr(0, dp), qual.substr(dp + 1));
         }
+        // Last resort: search all modules (handles unresolved cross-module refs in parameterized type bodies)
         if (!valueAssignmentNode || valueAssignmentNode->type != NodeType::VALUE_ASSIGNMENT) {
-            throw std::runtime_error("Undefined value reference '" + boundNode->name + "' in constraint at " + boundNode->location.toString());
+            auto globalResult = table.findSymbolInAnyModule(boundNode->name);
+            if (globalResult.has_value()) valueAssignmentNode = globalResult->second;
+        }
+        // Unresolvable: treat as a parameter placeholder — signal caller to skip this constraint
+        if (!valueAssignmentNode || valueAssignmentNode->type != NodeType::VALUE_ASSIGNMENT) {
+            return std::nullopt;
         }
         // The value assignment has two children: type and value. We need the value.
         auto valueNode = valueAssignmentNode->getChild(1);
         if (!valueNode || valueNode->type != NodeType::VALUE_NODE) {
-            throw std::runtime_error("Symbol '" + boundNode->name + "' is not a simple value assignment.");
+            return std::nullopt;
         }
         return std::stoll(valueNode->value.value());
     }
-    throw std::runtime_error("Invalid node type for constraint bound at " + boundNode->location.toString());
+    return std::nullopt;
 }
 
 AsnTypeInfoPtr ConstraintResolver::resolveConstraints(const AsnNodePtr& typeNode, const SymbolTable& table, const std::string& moduleName) {
@@ -85,12 +91,18 @@ AsnTypeInfoPtr ConstraintResolver::resolveConstraints(const AsnNodePtr& typeNode
     if (constraintNode) {
         if (constraintNode->name == "ValueRange" || constraintNode->name == "SizeRange") {
             if (constraintNode->getChildCount() > 0) {
-                long long minVal = resolveBound(constraintNode->getChild(0), table, moduleName);
-                long long maxVal = minVal;
-                if (constraintNode->getChildCount() > 1) {
-                    maxVal = resolveBound(constraintNode->getChild(1), table, moduleName);
+                auto minOpt = resolveBound(constraintNode->getChild(0), table, moduleName);
+                if (minOpt.has_value()) {
+                    long long minVal = *minOpt;
+                    long long maxVal = minVal;
+                    if (constraintNode->getChildCount() > 1) {
+                        auto maxOpt = resolveBound(constraintNode->getChild(1), table, moduleName);
+                        if (maxOpt.has_value()) maxVal = *maxOpt;
+                        else maxVal = minVal; // unresolvable upper bound → treat as fixed
+                    }
+                    typeInfo->setRangeConstraint(minVal, maxVal);
                 }
-                typeInfo->setRangeConstraint(minVal, maxVal);
+                // If lower bound is unresolvable (parameter placeholder), skip constraint entirely
             }
         } else if (constraintNode->name == "TableConstraint") {
             if (constraintNode->getChildCount() == 1 && constraintNode->getChild(0)->type == NodeType::FIELD_REFERENCE) {

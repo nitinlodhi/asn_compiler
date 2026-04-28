@@ -205,6 +205,7 @@ TokenType AsnLexer::checkKeyword(const std::string& text) const {
     if (text == "CLASS") return TokenType::CLASS;
     if (text == "CONTAINING") return TokenType::CONTAINING;
     if (text == "WITH") return TokenType::WITH;
+    if (text == "UNIQUE") return TokenType::UNIQUE;
     if (text == "COMPONENTS") return TokenType::COMPONENTS;
     if (text == "IMPLICIT") return TokenType::IMPLICIT;
     if (text == "EXPLICIT") return TokenType::EXPLICIT;

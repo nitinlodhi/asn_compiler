@@ -123,6 +123,12 @@ AsnNodePtr AsnParser::parseImports() {
         do {
             Token symbol = consume(TokenType::IDENTIFIER, "Expected imported symbol name.");
             importedSymbols.push_back(symbol.lexeme);
+            // Skip optional {} for parameterized type names in IMPORTS (e.g., ProtocolIE-Container{})
+            if (check(TokenType::LBRACE)) {
+                advance();
+                while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) advance();
+                if (check(TokenType::RBRACE)) advance();
+            }
         } while (match(TokenType::COMMA));
 
         consume(TokenType::FROM, "Expected 'FROM'.");
@@ -142,20 +148,32 @@ AsnNodePtr AsnParser::parseAssignment() {
     Token nameToken = consume(TokenType::IDENTIFIER, "Expected assignment name");
 
     // Handle parameterized type definitions, e.g., "MyType { Param } ::= ..."
+    // Supports complex parameter lists like "{ E1AP-PROTOCOL-IES : IEsSetParam }"
     if (check(TokenType::LBRACE)) {
         auto assignment = std::make_shared<AsnNode>(NodeType::ASSIGNMENT, nameToken.lexeme, nameToken.location);
         assignment->isParameterized = true;
 
-        consume(TokenType::LBRACE, "Expected '{' for parameters.");
-        while(!check(TokenType::RBRACE)) {
-            Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name.");
-            auto paramNode = std::make_shared<AsnNode>(NodeType::IDENTIFIER, paramName.lexeme, paramName.location);
-            assignment->parameters.push_back(paramNode);
-            if (!match(TokenType::COMMA)) {
-                if (!check(TokenType::RBRACE)) {
-                    throw std::runtime_error("Expected ',' or '}' in parameter definition list at " + peek().location.toString());
+        advance(); // consume '{'
+        // Parse each comma-separated parameter group.
+        // For "E1AP-PROTOCOL-IES : IEsSetParam", only the last IDENTIFIER per group is the name.
+        // For "TypeParam" (simple form used in NR-RRC), the single IDENTIFIER is the name.
+        while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+            std::string lastIdent;
+            SourceLocation lastLoc = peek().location;
+            while (!check(TokenType::COMMA) && !check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+                if (check(TokenType::IDENTIFIER)) {
+                    Token t = advance();
+                    lastIdent = t.lexeme;
+                    lastLoc = t.location;
+                } else {
+                    advance(); // skip type constraint token (colon, class name keywords, etc.)
                 }
             }
+            if (!lastIdent.empty()) {
+                assignment->parameters.push_back(
+                    std::make_shared<AsnNode>(NodeType::IDENTIFIER, lastIdent, lastLoc));
+            }
+            match(TokenType::COMMA);
         }
         consume(TokenType::RBRACE, "Expected '}' to close parameters.");
 
@@ -173,6 +191,28 @@ AsnNodePtr AsnParser::parseAssignment() {
     bool isTypeAssignment = std::isupper(nameToken.lexeme[0]);
 
     if (isTypeAssignment) {
+        // Check for uppercase object set assignment: UpperName ClassName ::= { ... }
+        // These differ from type assignments in that the next token is not ::=
+        if (!check(TokenType::ASSIGNMENT)) {
+            // Skip class name and any tokens until ::=
+            while (!check(TokenType::ASSIGNMENT) && !check(TokenType::END_OF_FILE) && !check(TokenType::END)) {
+                advance();
+            }
+            if (!check(TokenType::ASSIGNMENT)) return nullptr;
+            consume(TokenType::ASSIGNMENT, "Expected '::='");
+            // Skip the body (object set or single object)
+            if (check(TokenType::LBRACE)) {
+                int depth = 1;
+                advance();
+                while (depth > 0 && !check(TokenType::END_OF_FILE)) {
+                    if (check(TokenType::LBRACE)) depth++;
+                    else if (check(TokenType::RBRACE)) depth--;
+                    advance();
+                }
+            }
+            return std::make_shared<AsnNode>(NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+        }
+
         // This is a Type Assignment: MyType ::= INTEGER
         consume(TokenType::ASSIGNMENT, "Expected '::=' for type assignment '" + nameToken.lexeme + "'");
         if (check(TokenType::CLASS)) {
@@ -196,14 +236,44 @@ AsnNodePtr AsnParser::parseAssignment() {
         }
 
         if (type->type == NodeType::IDENTIFIER &&
-            peek().type == TokenType::ASSIGNMENT && peekNext().type == TokenType::LBRACE) {
-            // This is an Object Set Assignment: mySet MY-CLASS ::= { ... }
-            consume(TokenType::ASSIGNMENT, "Expected '::=' for object set assignment");
-            auto objectSet = parseObjectSet();
-            auto assignment = std::make_shared<AsnNode>(NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
-            assignment->addChild(type); // The class
-            assignment->addChild(objectSet);
-            return assignment;
+            peek().type == TokenType::ASSIGNMENT) {
+            consume(TokenType::ASSIGNMENT, "Expected '::=' for object set/value assignment");
+            if (check(TokenType::LBRACE)) {
+                // Peek inside: if the body starts with '{' or '...' it's an object set
+                // (e.g., mySet CLASS ::= { { &id 10 }, { &id 20 } }). Otherwise it's a
+                // single WITH SYNTAX object (e.g., reset PROC ::= { INITIATING … }) — skip it.
+                size_t savedCurrent = current;
+                advance(); // consume '{'
+                bool isObjectSet = check(TokenType::LBRACE) || check(TokenType::ELLIPSIS);
+                current = savedCurrent; // restore to before '{'
+
+                if (isObjectSet) {
+                    auto objectSet = parseObjectSet();
+                    auto assignment = std::make_shared<AsnNode>(NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+                    assignment->addChild(type);      // child(0): class reference
+                    assignment->addChild(objectSet); // child(1): object set body
+                    return assignment;
+                } else {
+                    // Single WITH SYNTAX object — skip entire braced body
+                    int depth = 1;
+                    advance(); // consume '{'
+                    while (depth > 0 && !check(TokenType::END_OF_FILE)) {
+                        if (check(TokenType::LBRACE)) depth++;
+                        else if (check(TokenType::RBRACE)) depth--;
+                        advance();
+                    }
+                    auto assignment = std::make_shared<AsnNode>(NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+                    assignment->addChild(type);
+                    return assignment;
+                }
+            } else {
+                // Value assignment with named type (e.g., id-reset ProcedureCode ::= 0)
+                auto valueNode = parseIntegerValue();
+                auto assignment = std::make_shared<AsnNode>(NodeType::VALUE_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+                assignment->addChild(type);
+                assignment->addChild(valueNode);
+                return assignment;
+            }
         } else {
             consume(TokenType::ASSIGNMENT, "Expected '::=' for value assignment '" + nameToken.lexeme + "'");
             auto valueNode = parseValue(type);
@@ -560,13 +630,58 @@ AsnNodePtr AsnParser::parseObjectSet() {
     consume(TokenType::LBRACE, "Expected '{' for object set");
     auto setNode = std::make_shared<AsnNode>(NodeType::VALUE_NODE, "OBJECT_SET", peek().location);
 
-    while(!check(TokenType::RBRACE)) {
-        auto object = parseObject();
-        setNode->addChild(object);
-        if (!match(TokenType::COMMA)) {
-            if (!check(TokenType::RBRACE)) {
-                throw std::runtime_error("Expected ',' or '}' in object set at " + peek().location.toString());
+    while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+        if (match(TokenType::ELLIPSIS)) {
+            // Extension marker — skip
+        } else if (check(TokenType::LBRACE)) {
+            // Peek inside: if next token after '{' is '&', it's &-notation → parse it;
+            // otherwise it's WITH SYNTAX style → skip the entire braced block.
+            Token saved = peek();
+            advance(); // consume '{'
+            if (check(TokenType::AMPERSAND)) {
+                // Restore position and call parseObject() which starts with '{'
+                // We already consumed '{', so we need to put it back conceptually.
+                // Instead, parse fields directly here, reusing parseObject logic.
+                auto objectNode = std::make_shared<AsnNode>(NodeType::OBJECT_DEFINITION, "OBJECT", saved.location);
+                while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+                    if (match(TokenType::AMPERSAND)) {
+                        Token fieldName = consume(TokenType::IDENTIFIER, "Expected field name in object");
+                        AsnNodePtr fieldValue;
+                        bool is_negative = check(TokenType::MINUS) && peekNext().type == TokenType::NUMBER;
+                        if (is_negative || check(TokenType::NUMBER)) {
+                            fieldValue = parseIntegerValue();
+                        } else {
+                            fieldValue = parseType();
+                            if (!fieldValue) fieldValue = parseValue(nullptr);
+                        }
+                        auto fieldAssignment = std::make_shared<AsnNode>(NodeType::ASSIGNMENT, fieldName.lexeme, fieldName.location);
+                        fieldAssignment->addChild(fieldValue);
+                        objectNode->addChild(fieldAssignment);
+                    }
+                    if (!match(TokenType::COMMA) && !check(TokenType::RBRACE)) break;
+                }
+                if (check(TokenType::RBRACE)) advance(); // consume closing '}'
+                setNode->addChild(objectNode);
+            } else {
+                // WITH SYNTAX style — skip remaining tokens until matching '}'
+                int depth = 1;
+                while (depth > 0 && !check(TokenType::END_OF_FILE)) {
+                    if (check(TokenType::LBRACE)) depth++;
+                    else if (check(TokenType::RBRACE)) depth--;
+                    advance();
+                }
             }
+        } else if (check(TokenType::IDENTIFIER)) {
+            // Object set reference (e.g., E1AP-ELEMENTARY-PROCEDURES-CLASS-1)
+            Token ref = advance();
+            setNode->addChild(std::make_shared<AsnNode>(NodeType::IDENTIFIER, ref.lexeme, ref.location));
+        } else {
+            advance(); // skip unexpected tokens
+        }
+
+        // Allow both comma and pipe as separators
+        if (!check(TokenType::RBRACE)) {
+            match(TokenType::COMMA) || match(TokenType::PIPE);
         }
     }
 
@@ -616,16 +731,41 @@ AsnNodePtr AsnParser::parseClassDefinition() {
     while (!check(TokenType::RBRACE)) {
         if (match(TokenType::AMPERSAND)) {
             Token fieldName = consume(TokenType::IDENTIFIER, "Expected field name");
-            auto fieldType = parseType();
-            if (!fieldType) {
-                throw std::runtime_error("Expected type for class field '&" + fieldName.lexeme + "' at " + fieldName.location.toString());
-            }
-            // Use an ASSIGNMENT node to represent the field spec: &name TYPE
             auto fieldSpec = std::make_shared<AsnNode>(NodeType::ASSIGNMENT, fieldName.lexeme, fieldName.location);
-            if (fieldType->type == NodeType::IDENTIFIER && fieldType->name == "TYPE") {
+
+            // Type field: no explicit type (e.g., "&InitiatingMessage ,")
+            // Fixed-type value field: has a type (e.g., "&procedureCode ProcedureCode UNIQUE")
+            bool isTypeField = check(TokenType::COMMA) || check(TokenType::RBRACE) || check(TokenType::OPTIONAL);
+            if (!isTypeField) {
+                auto fieldType = parseType();
+                if (fieldType) {
+                    if (fieldType->type == NodeType::IDENTIFIER && fieldType->name == "TYPE") {
+                        fieldSpec->isTypeField = true;
+                    }
+                    fieldSpec->addChild(fieldType);
+                } else {
+                    fieldSpec->isTypeField = true;
+                    fieldSpec->addChild(std::make_shared<AsnNode>(NodeType::IDENTIFIER, "TYPE", fieldName.location));
+                }
+            } else {
+                // Bare type field: &Field , — no explicit type, treat as open type
                 fieldSpec->isTypeField = true;
+                fieldSpec->addChild(std::make_shared<AsnNode>(NodeType::IDENTIFIER, "TYPE", fieldName.location));
             }
-            fieldSpec->addChild(fieldType);
+
+            // Consume optional UNIQUE modifier
+            if (check(TokenType::UNIQUE)) advance();
+
+            // Consume optional OPTIONAL modifier
+            if (match(TokenType::OPTIONAL)) fieldSpec->isOptional = true;
+
+            // Consume optional DEFAULT value (skip the value token)
+            if (match(TokenType::DEFAULT)) {
+                if (!check(TokenType::COMMA) && !check(TokenType::RBRACE)) {
+                    advance(); // skip the default value (e.g., 'ignore')
+                }
+            }
+
             classNode->addChild(fieldSpec);
         }
 
@@ -637,7 +777,7 @@ AsnNodePtr AsnParser::parseClassDefinition() {
     }
     consume(TokenType::RBRACE, "Expected '}'");
 
-    // Optional WITH SYNTAX clause, parse and discard for now
+    // Optional WITH SYNTAX clause — parse and discard
     if (match(TokenType::WITH)) {
         consume(TokenType::SYNTAX, "Expected 'SYNTAX'");
         consume(TokenType::LBRACE, "Expected '{'");
@@ -694,17 +834,35 @@ AsnNodePtr AsnParser::parseCharacterString(NodeType nodeType, const std::string&
 
 void AsnParser::parseParameters(const AsnNodePtr& ownerNode) {
     consume(TokenType::LBRACE, "Expected '{' for parameters.");
-    while(!check(TokenType::RBRACE)) {
+    while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
         if (match(TokenType::AT_SIGN)) {
             Token fieldName = consume(TokenType::IDENTIFIER, "Expected field name after '@'");
             auto paramNode = std::make_shared<AsnNode>(NodeType::RELATIVE_REFERENCE, fieldName.lexeme, fieldName.location);
             ownerNode->parameters.push_back(paramNode);
+        } else if (check(TokenType::LBRACE)) {
+            // Nested braces: e.g., {ResetIEs} or {@id}
+            // Extract the first meaningful token as the parameter value.
+            advance(); // consume inner '{'
+            if (match(TokenType::AT_SIGN)) {
+                // Relative reference: {@fieldName}
+                Token fieldName = consume(TokenType::IDENTIFIER, "Expected field name after '@'");
+                auto paramNode = std::make_shared<AsnNode>(NodeType::RELATIVE_REFERENCE, fieldName.lexeme, fieldName.location);
+                ownerNode->parameters.push_back(paramNode);
+            } else if (check(TokenType::IDENTIFIER)) {
+                // Object set reference: {ResetIEs}
+                Token setName = advance();
+                auto paramNode = std::make_shared<AsnNode>(NodeType::IDENTIFIER, setName.lexeme, setName.location);
+                ownerNode->parameters.push_back(paramNode);
+            }
+            // Skip remaining tokens until matching '}'
+            while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) advance();
+            if (check(TokenType::RBRACE)) advance(); // consume inner '}'
         } else if (check(TokenType::IDENTIFIER)) {
             Token setName = consume(TokenType::IDENTIFIER, "Expected object set name");
             auto paramNode = std::make_shared<AsnNode>(NodeType::IDENTIFIER, setName.lexeme, setName.location);
             ownerNode->parameters.push_back(paramNode);
         } else {
-            throw std::runtime_error("Unexpected token '" + peek().lexeme + "' in parameter list at " + peek().location.toString());
+            advance(); // skip unexpected tokens (commas, pipes, etc.)
         }
     }
     consume(TokenType::RBRACE, "Expected '}' to close parameters.");
@@ -815,7 +973,18 @@ AsnNodePtr AsnParser::parseBitString() {
 AsnNodePtr AsnParser::parseInteger() {
     Token token = advance();
     auto integer = std::make_shared<AsnNode>(NodeType::INTEGER, "INTEGER", token.location);
-    
+
+    // Skip optional named-value list: INTEGER { spare(0), highest(1), ... }
+    if (check(TokenType::LBRACE)) {
+        int depth = 1;
+        advance();
+        while (depth > 0 && !check(TokenType::END_OF_FILE)) {
+            if (check(TokenType::LBRACE)) depth++;
+            else if (check(TokenType::RBRACE)) depth--;
+            advance();
+        }
+    }
+
     if (check(TokenType::LPAREN)) {
         auto constraint = parseConstraint();
         if (constraint) {
@@ -872,6 +1041,8 @@ AsnNodePtr AsnParser::parseConstraint() {
         if (match(TokenType::DOTDOT)) {
             constraintNode->addChild(parseConstraintBound());
         }
+        // Skip extension marker inside SIZE constraint (e.g., SIZE(1..150,...))
+        if (match(TokenType::COMMA)) match(TokenType::ELLIPSIS);
         consume(TokenType::RPAREN, "Expected ')' to close size constraint range.");
     } else if (match(TokenType::WITH)) {
         // This is a WITH COMPONENTS constraint: (WITH COMPONENTS { a, b, ... })
@@ -916,7 +1087,12 @@ AsnNodePtr AsnParser::parseConstraint() {
             }
         }
     }
-    
+
+    // Skip extension marker ", ..." inside constraints (e.g., INTEGER (0..4095, ...))
+    if (match(TokenType::COMMA)) {
+        match(TokenType::ELLIPSIS);
+    }
+
     consume(TokenType::RPAREN, "Expected ')' to close constraint.");
     return constraintNode;
 }

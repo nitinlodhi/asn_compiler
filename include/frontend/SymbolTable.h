@@ -20,9 +20,11 @@ public:
 
     bool addSymbol(const std::string& moduleName, const std::string& symbolName, AsnNodePtr node);
     AsnNodePtr lookupSymbol(const std::string& moduleName, const std::string& symbolName) const;
+    // Search all modules for a symbol; returns {moduleName, node} or nullopt
+    std::optional<std::pair<std::string, AsnNodePtr>> findSymbolInAnyModule(const std::string& symbolName) const;
     bool addTypeInfo(const std::string& name, AsnTypeInfoPtr info);
     AsnTypeInfoPtr getTypeInfo(const std::string& name) const;
-    
+
     void resolveReferences(const std::vector<AsnNodePtr>& all_asts);
     bool isSymbolDefined(const std::string& moduleName, const std::string& symbolName) const;
     void printSymbols() const;

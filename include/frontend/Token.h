@@ -33,6 +33,7 @@ enum class TokenType {
     CLASS,
     CONTAINING,
     WITH,
+    UNIQUE,
     COMPONENTS,
     IMPLICIT,
     EXPLICIT,

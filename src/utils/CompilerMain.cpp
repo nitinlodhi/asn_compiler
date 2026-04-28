@@ -251,7 +251,8 @@ int main(int argc, char* argv[]) {
                                 "Could not find imported module '" + moduleToImport + "'");
                         }
                     } else if (child->type == frontend::NodeType::ASSIGNMENT ||
-                               child->type == frontend::NodeType::VALUE_ASSIGNMENT) {
+                               child->type == frontend::NodeType::VALUE_ASSIGNMENT ||
+                               child->type == frontend::NodeType::OBJECT_SET_ASSIGNMENT) {
                         globalSymbolTable.addSymbol(ast->name, child->name, child);
                     }
                 }
@@ -309,7 +310,6 @@ int main(int argc, char* argv[]) {
 
                 // Type definitions in the header
                 for (const auto& node : sorted_assignments) {
-                    if (node->isParameterized) continue; // skip template types; only concrete instantiations are emitted
                     auto typeDefNode = node->getChild(0);
                     if (!typeDefNode) continue;
                     switch (typeDefNode->type) {
@@ -362,7 +362,6 @@ int main(int argc, char* argv[]) {
                 size_t total = sorted_assignments.size();
                 for (size_t i = 0; i < total; ++i) {
                     const auto& node = sorted_assignments[i];
-                    if (node->isParameterized) continue;
                     utils::Logger::info("  - " + node->name + " (" +
                                         std::to_string(i + 1) + "/" +
                                         std::to_string(total) + ")");
