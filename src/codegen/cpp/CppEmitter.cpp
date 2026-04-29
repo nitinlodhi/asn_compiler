@@ -591,6 +591,8 @@ std::string CppEmitter::emitSequenceOf(const frontend::AsnNodePtr& assignmentNod
         if (elementTypeName == "struct" || elementTypeName == "enum" ||
             elementTypeName == "std::variant" || elementTypeName == "std::vector")
             elementTypeName = "uint8_t";
+        else if (elementTypeName == elementTypeNode->name)
+            elementTypeName = id(elementTypeName); // mangle user-defined type name (e.g. Foo-Bar → Foo_Bar)
     }
     code += formatter.formatCode("using " + mangledName + " = std::vector<" + elementTypeName + ">;\n\n");
     return code;

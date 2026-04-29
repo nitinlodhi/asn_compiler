@@ -184,8 +184,8 @@ std::string CCodecEmitter::emitDecoderDeclaration(const AsnNodePtr& node,
 
 // ── definition entry points ───────────────────────────────────────────────
 
-std::string CCodecEmitter::emitEncoderDefinition(const AsnNodePtr& node,
-                                                   const std::string& module) {
+std::string CCodecEmitter::emitEncoderDefinitionRaw(const AsnNodePtr& node,
+                                                      const std::string& module) {
     auto raw_type = node->getChild(0);
     if (!raw_type) return "";
     auto type_node = resolveEffectiveType(node);
@@ -252,8 +252,17 @@ std::string CCodecEmitter::emitEncoderDefinition(const AsnNodePtr& node,
     return sig + " {\n" + body + "}\n\n";
 }
 
-std::string CCodecEmitter::emitDecoderDefinition(const AsnNodePtr& node,
+std::string CCodecEmitter::emitEncoderDefinition(const AsnNodePtr& node,
                                                    const std::string& module) {
+    pending_helpers_enc_ = "";
+    std::string def = emitEncoderDefinitionRaw(node, module);
+    std::string preamble = pending_helpers_enc_;
+    pending_helpers_enc_ = "";
+    return preamble + def;
+}
+
+std::string CCodecEmitter::emitDecoderDefinitionRaw(const AsnNodePtr& node,
+                                                      const std::string& module) {
     auto raw_type = node->getChild(0);
     if (!raw_type) return "";
     auto type_node = resolveEffectiveType(node);
@@ -307,6 +316,15 @@ std::string CCodecEmitter::emitDecoderDefinition(const AsnNodePtr& node,
     }
 
     return sig + " {\n" + body + "}\n\n";
+}
+
+std::string CCodecEmitter::emitDecoderDefinition(const AsnNodePtr& node,
+                                                   const std::string& module) {
+    pending_helpers_dec_ = "";
+    std::string def = emitDecoderDefinitionRaw(node, module);
+    std::string preamble = pending_helpers_dec_;
+    pending_helpers_dec_ = "";
+    return preamble + def;
 }
 
 // ── INTEGER ───────────────────────────────────────────────────────────────
@@ -710,6 +728,22 @@ std::string CCodecEmitter::generateSequenceLogic(const AsnNodePtr& node,
                                     inner_code += "    if (rc != 0) return rc;\n";
                                     inner_code += "    return 0;\n";
                                 }
+                            } else if (child0->resolvedTypeNode) {
+                                // Parameterized instantiation: generate a static helper codec
+                                std::string inl_name = id(node->name) + "_" + safeId(m.name) + "_type";
+                                std::string inl_fn = cName(module, "encode_" + inl_name);
+                                AsnNodePtr dummy = std::make_shared<AsnNode>(NodeType::ASSIGNMENT,
+                                    inl_name, child0->resolvedTypeNode->location);
+                                dummy->addChild(child0->resolvedTypeNode);
+                                std::string saved_ph = pending_helpers_enc_;
+                                pending_helpers_enc_ = "";
+                                std::string helper_def = emitEncoderDefinitionRaw(dummy, module);
+                                std::string sub_helpers = pending_helpers_enc_;
+                                pending_helpers_enc_ = saved_ph + sub_helpers + "static " + helper_def;
+                                inner_code  = "    int rc = 0; (void)rc;\n";
+                                inner_code += "    rc = " + inl_fn + "(writer, &(" + field + "), err_buf, err_buf_len);\n";
+                                inner_code += "    if (rc != 0) return rc;\n";
+                                inner_code += "    return 0;\n";
                             }
                         }
                         if (inner_code.empty()) inner_code = "    /* TODO: encode " + m.name + " */\n    return 0;\n";
@@ -825,6 +859,22 @@ std::string CCodecEmitter::generateSequenceLogic(const AsnNodePtr& node,
                                     inner_code += "    if (rc != 0) return rc;\n";
                                     inner_code += "    return 0;\n";
                                 }
+                            } else if (child0->resolvedTypeNode) {
+                                // Parameterized instantiation: generate a static helper codec
+                                std::string inl_name = id(node->name) + "_" + safeId(m.name) + "_type";
+                                std::string inl_fn = cName(module, "decode_" + inl_name);
+                                AsnNodePtr dummy = std::make_shared<AsnNode>(NodeType::ASSIGNMENT,
+                                    inl_name, child0->resolvedTypeNode->location);
+                                dummy->addChild(child0->resolvedTypeNode);
+                                std::string saved_ph = pending_helpers_dec_;
+                                pending_helpers_dec_ = "";
+                                std::string helper_def = emitDecoderDefinitionRaw(dummy, module);
+                                std::string sub_helpers = pending_helpers_dec_;
+                                pending_helpers_dec_ = saved_ph + sub_helpers + "static " + helper_def;
+                                inner_code  = "    int rc = 0; (void)rc;\n";
+                                inner_code += "    rc = " + inl_fn + "(reader, &(" + field + "), err_buf, err_buf_len);\n";
+                                inner_code += "    if (rc != 0) return rc;\n";
+                                inner_code += "    return 0;\n";
                             }
                         }
                         if (inner_code.empty()) inner_code = "    /* TODO: decode " + m.name + " */\n    return 0;\n";
@@ -942,6 +992,9 @@ std::string CCodecEmitter::generateChoiceLogic(const AsnNodePtr& node,
                             inner = generateBooleanLogic(field, true); break;
                         case NodeType::ENUMERATION:
                             inner = generateEnumeratedLogic(eff, field, true); break;
+                        case NodeType::NULL_TYPE:
+                            inner = "    /* NULL — nothing to encode */\n";
+                            break;
                         case NodeType::SEQUENCE:
                         case NodeType::SET:
                         case NodeType::CHOICE:
@@ -960,6 +1013,22 @@ std::string CCodecEmitter::generateChoiceLogic(const AsnNodePtr& node,
                                         inner += "    if (rc != 0) return rc;\n";
                                         inner += "    return 0;\n";
                                     }
+                                } else if (child0->resolvedTypeNode) {
+                                    // Parameterized instantiation: generate a static helper codec
+                                    std::string inl_name = id(node->name) + "_" + safeId(a.name) + "_type";
+                                    std::string inl_fn = cName(module, "encode_" + inl_name);
+                                    AsnNodePtr dummy = std::make_shared<AsnNode>(NodeType::ASSIGNMENT,
+                                        inl_name, child0->resolvedTypeNode->location);
+                                    dummy->addChild(child0->resolvedTypeNode);
+                                    std::string saved_ph = pending_helpers_enc_;
+                                    pending_helpers_enc_ = "";
+                                    std::string helper_def = emitEncoderDefinitionRaw(dummy, module);
+                                    std::string sub_helpers = pending_helpers_enc_;
+                                    pending_helpers_enc_ = saved_ph + sub_helpers + "static " + helper_def;
+                                    inner  = "    int rc = 0; (void)rc;\n";
+                                    inner += "    rc = " + inl_fn + "(writer, &(" + field + "), err_buf, err_buf_len);\n";
+                                    inner += "    if (rc != 0) return rc;\n";
+                                    inner += "    return 0;\n";
                                 }
                             }
                             if (inner.empty()) inner = "        /* TODO: compound type " + a.name + " */\n";
@@ -1028,6 +1097,9 @@ std::string CCodecEmitter::generateChoiceLogic(const AsnNodePtr& node,
                             inner = generateBooleanLogic(field, false); break;
                         case NodeType::ENUMERATION:
                             inner = generateEnumeratedLogic(eff, field, false); break;
+                        case NodeType::NULL_TYPE:
+                            inner = "    /* NULL — nothing to decode */\n";
+                            break;
                         case NodeType::SEQUENCE:
                         case NodeType::SET:
                         case NodeType::CHOICE:
@@ -1046,6 +1118,22 @@ std::string CCodecEmitter::generateChoiceLogic(const AsnNodePtr& node,
                                         inner += "    if (rc != 0) return rc;\n";
                                         inner += "    return 0;\n";
                                     }
+                                } else if (child0->resolvedTypeNode) {
+                                    // Parameterized instantiation: generate a static helper codec
+                                    std::string inl_name = id(node->name) + "_" + safeId(a.name) + "_type";
+                                    std::string inl_fn = cName(module, "decode_" + inl_name);
+                                    AsnNodePtr dummy = std::make_shared<AsnNode>(NodeType::ASSIGNMENT,
+                                        inl_name, child0->resolvedTypeNode->location);
+                                    dummy->addChild(child0->resolvedTypeNode);
+                                    std::string saved_ph = pending_helpers_dec_;
+                                    pending_helpers_dec_ = "";
+                                    std::string helper_def = emitDecoderDefinitionRaw(dummy, module);
+                                    std::string sub_helpers = pending_helpers_dec_;
+                                    pending_helpers_dec_ = saved_ph + sub_helpers + "static " + helper_def;
+                                    inner  = "    int rc = 0; (void)rc;\n";
+                                    inner += "    rc = " + inl_fn + "(reader, &(" + field + "), err_buf, err_buf_len);\n";
+                                    inner += "    if (rc != 0) return rc;\n";
+                                    inner += "    return 0;\n";
                                 }
                             }
                             if (inner.empty()) inner = "        /* TODO: compound type " + a.name + " */\n";

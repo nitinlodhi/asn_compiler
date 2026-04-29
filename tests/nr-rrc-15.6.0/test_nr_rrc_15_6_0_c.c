@@ -1281,6 +1281,131 @@ static void test_MeasurementTimingConfiguration_roundtrip(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * 11. BWP_DownlinkDedicated — parameterized SetupRelease{X} fields
+ *     pdcch_Config, pdsch_Config, sps_Config, radioLinkMonitoringConfig
+ *     are all SetupRelease { X } instantiations.  Their codecs were generated
+ *     as static inline helper functions — exercise the round-trip here.
+ * ═══════════════════════════════════════════════════════════════════════════*/
+
+static void test_BWP_DownlinkDedicated_parameterized_release(void) {
+    char err[ERR_BUF_SIZE] = {0};
+    NR_RRC_Definitions_BWP_DownlinkDedicated val;
+    NR_RRC_Definitions_BWP_DownlinkDedicated out;
+    Asn1BitWriter bw;
+    Asn1BitReader br;
+    int rc;
+
+    memset(&val, 0, sizeof(val));
+
+    /* pdcch_Config = release (tag 0 = release NULL) */
+    val.has_pdcch_Config = 1;
+    val.pdcch_Config.tag = NR_RRC_Definitions_BWP_DownlinkDedicated_pdcch_Config_type_TAG_release;
+
+    asn1_bw_init(&bw);
+    rc = NR_RRC_Definitions_encode_BWP_DownlinkDedicated(&bw, &val, err, sizeof(err));
+    if (rc != 0) {
+        report_fail("BWP_DownlinkDedicated: SetupRelease release round-trip", err);
+        asn1_bw_free(&bw);
+        return;
+    }
+    memset(&out, 0, sizeof(out));
+    asn1_br_init(&br, asn1_bw_get_buffer(&bw), asn1_bw_get_buffer_size(&bw));
+    rc = NR_RRC_Definitions_decode_BWP_DownlinkDedicated(&br, &out, err, sizeof(err));
+    if (rc == 0 &&
+        out.has_pdcch_Config &&
+        out.pdcch_Config.tag ==
+            NR_RRC_Definitions_BWP_DownlinkDedicated_pdcch_Config_type_TAG_release)
+        report_pass("BWP_DownlinkDedicated: SetupRelease release round-trip");
+    else
+        report_fail("BWP_DownlinkDedicated: SetupRelease release round-trip",
+                    rc != 0 ? err : "decoded tag mismatch");
+    asn1_bw_free(&bw);
+}
+
+static void test_BWP_DownlinkDedicated_all_absent(void) {
+    char err[ERR_BUF_SIZE] = {0};
+    NR_RRC_Definitions_BWP_DownlinkDedicated val;
+    NR_RRC_Definitions_BWP_DownlinkDedicated out;
+    Asn1BitWriter bw;
+    Asn1BitReader br;
+    int rc;
+
+    memset(&val, 0, sizeof(val));
+    /* All optional fields absent */
+    val.has_pdcch_Config               = 0;
+    val.has_pdsch_Config               = 0;
+    val.has_sps_Config                 = 0;
+    val.has_radioLinkMonitoringConfig  = 0;
+
+    asn1_bw_init(&bw);
+    rc = NR_RRC_Definitions_encode_BWP_DownlinkDedicated(&bw, &val, err, sizeof(err));
+    if (rc != 0) {
+        report_fail("BWP_DownlinkDedicated: all parameterized fields absent", err);
+        asn1_bw_free(&bw);
+        return;
+    }
+    memset(&out, 0, sizeof(out));
+    asn1_br_init(&br, asn1_bw_get_buffer(&bw), asn1_bw_get_buffer_size(&bw));
+    rc = NR_RRC_Definitions_decode_BWP_DownlinkDedicated(&br, &out, err, sizeof(err));
+    if (rc == 0 &&
+        !out.has_pdcch_Config && !out.has_pdsch_Config &&
+        !out.has_sps_Config   && !out.has_radioLinkMonitoringConfig)
+        report_pass("BWP_DownlinkDedicated: all parameterized fields absent");
+    else
+        report_fail("BWP_DownlinkDedicated: all parameterized fields absent",
+                    rc != 0 ? err : "unexpected field present after decode");
+    asn1_bw_free(&bw);
+}
+
+static void test_BWP_DownlinkDedicated_multiple_release(void) {
+    char err[ERR_BUF_SIZE] = {0};
+    NR_RRC_Definitions_BWP_DownlinkDedicated val;
+    NR_RRC_Definitions_BWP_DownlinkDedicated out;
+    Asn1BitWriter bw;
+    Asn1BitReader br;
+    int rc;
+
+    memset(&val, 0, sizeof(val));
+
+    /* Set all four parameterized fields to release */
+    val.has_pdcch_Config  = 1;
+    val.pdcch_Config.tag  = NR_RRC_Definitions_BWP_DownlinkDedicated_pdcch_Config_type_TAG_release;
+    val.has_pdsch_Config  = 1;
+    val.pdsch_Config.tag  = NR_RRC_Definitions_BWP_DownlinkDedicated_pdsch_Config_type_TAG_release;
+    val.has_sps_Config    = 1;
+    val.sps_Config.tag    = NR_RRC_Definitions_BWP_DownlinkDedicated_sps_Config_type_TAG_release;
+    val.has_radioLinkMonitoringConfig = 1;
+    val.radioLinkMonitoringConfig.tag =
+        NR_RRC_Definitions_BWP_DownlinkDedicated_radioLinkMonitoringConfig_type_TAG_release;
+
+    asn1_bw_init(&bw);
+    rc = NR_RRC_Definitions_encode_BWP_DownlinkDedicated(&bw, &val, err, sizeof(err));
+    if (rc != 0) {
+        report_fail("BWP_DownlinkDedicated: four SetupRelease fields all release", err);
+        asn1_bw_free(&bw);
+        return;
+    }
+    memset(&out, 0, sizeof(out));
+    asn1_br_init(&br, asn1_bw_get_buffer(&bw), asn1_bw_get_buffer_size(&bw));
+    rc = NR_RRC_Definitions_decode_BWP_DownlinkDedicated(&br, &out, err, sizeof(err));
+    if (rc == 0 &&
+        out.has_pdcch_Config &&
+        out.pdcch_Config.tag == NR_RRC_Definitions_BWP_DownlinkDedicated_pdcch_Config_type_TAG_release &&
+        out.has_pdsch_Config &&
+        out.pdsch_Config.tag == NR_RRC_Definitions_BWP_DownlinkDedicated_pdsch_Config_type_TAG_release &&
+        out.has_sps_Config &&
+        out.sps_Config.tag == NR_RRC_Definitions_BWP_DownlinkDedicated_sps_Config_type_TAG_release &&
+        out.has_radioLinkMonitoringConfig &&
+        out.radioLinkMonitoringConfig.tag ==
+            NR_RRC_Definitions_BWP_DownlinkDedicated_radioLinkMonitoringConfig_type_TAG_release)
+        report_pass("BWP_DownlinkDedicated: four SetupRelease fields all release");
+    else
+        report_fail("BWP_DownlinkDedicated: four SetupRelease fields all release",
+                    rc != 0 ? err : "decoded tag mismatch");
+    asn1_bw_free(&bw);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * entry point
  * ═══════════════════════════════════════════════════════════════════════════*/
 
@@ -1333,6 +1458,10 @@ int main(void) {
     test_PagingRecord_roundtrip();
 
     test_MeasurementTimingConfiguration_roundtrip();
+
+    test_BWP_DownlinkDedicated_parameterized_release();
+    test_BWP_DownlinkDedicated_all_absent();
+    test_BWP_DownlinkDedicated_multiple_release();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_passed, g_failed);
     return g_failed > 0 ? 1 : 0;

@@ -1,6 +1,7 @@
 #ifndef ASN1_CODEGEN_C_CODEC_EMITTER_H
 #define ASN1_CODEGEN_C_CODEC_EMITTER_H
 
+#include <set>
 #include <string>
 #include "frontend/AsnNode.h"
 #include "frontend/SymbolTable.h"
@@ -36,6 +37,12 @@ private:
     Formatter formatter;
     const frontend::SymbolTable* symbol_table = nullptr;
     std::string current_module;
+
+    // Accumulated static helper codec functions for parameterized-type instantiations.
+    // generateSequenceLogic/generateChoiceLogic append to these; emitEncoder/DecoderDefinition
+    // drains them and prepends to the emitted function.
+    std::string pending_helpers_enc_;
+    std::string pending_helpers_dec_;
 
     // Per-type codec body generators (encoder + decoder combined).
     std::string generateBitStringLogic(const frontend::AsnNodePtr& type_node,
@@ -84,6 +91,13 @@ private:
     static std::string cRef(const std::string& resolved_name,
                             const std::string& current_module);
     static bool isScalarCType(const frontend::AsnNodePtr& type_node);
+
+    // Internal: generates the function body without draining pending_helpers.
+    // The public emitEncoder/DecoderDefinition wraps this to collect helpers.
+    std::string emitEncoderDefinitionRaw(const frontend::AsnNodePtr& node,
+                                         const std::string& module_name);
+    std::string emitDecoderDefinitionRaw(const frontend::AsnNodePtr& node,
+                                         const std::string& module_name);
 };
 
 } // namespace asn1::codegen
