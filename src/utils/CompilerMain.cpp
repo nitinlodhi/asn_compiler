@@ -15,6 +15,7 @@
 #include "codegen/c/CEmitter.h"
 #include "codegen/c/CCodecEmitter.h"
 #include "codegen/TypeMap.h"
+#include "codegen/cpp/JsonEmitter.h"
 #include "frontend/SymbolTable.h"
 #include "frontend/ConstraintResolver.h"
 
@@ -29,6 +30,7 @@ void printUsage(const char* programName) {
               << "  -I <path>             Add a directory to the search path for imports\n"
               << "  -n, --namespace <ns>  C++ namespace (default: asn1::generated)\n"
               << "  --lang <cpp|c>        Output language (default: cpp)\n"
+              << "  --json                Also emit <base>_json.hpp with nlohmann/json adapters\n"
               << "  --test                Run validation tests\n"
               << "  -v, --verbose         Enable verbose output\n"
               << "  -h, --help            Show this help message\n";
@@ -91,6 +93,21 @@ static std::vector<frontend::AsnNodePtr> topoSortAssignments(
                 depMap[owner].insert(it->second);
             // Do not recurse into resolvedTypeNode itself.
         }
+        // Track dependencies via resolvedName (set by resolver for non-parameterized bodies).
+        if (node->resolvedName.has_value()) {
+            const auto& rn = node->resolvedName.value();
+            std::string typePart = rn;
+            auto dot = rn.rfind('.');
+            if (dot != std::string::npos) typePart = rn.substr(dot + 1);
+            if (nameToNode.count(typePart) && typePart != owner)
+                depMap[owner].insert(typePart);
+        }
+        // Track dependencies via bare node name for IDENTIFIER nodes in parameterized bodies
+        // where resolvedName is not set (resolver skips parameterized assignment bodies).
+        if (node->type == frontend::NodeType::IDENTIFIER && !node->resolvedName.has_value()) {
+            if (nameToNode.count(node->name) && node->name != owner)
+                depMap[owner].insert(node->name);
+        }
         for (const auto& c : node->children)    collect(c, owner, visited);
         for (const auto& p : node->parameters)  collect(p, owner, visited);
     };
@@ -141,6 +158,56 @@ static std::vector<frontend::AsnNodePtr> topoSortAssignments(
     return result;
 }
 
+static std::vector<frontend::AsnNodePtr> topoSortModules(
+    const std::vector<frontend::AsnNodePtr>& modules)
+{
+    std::unordered_map<std::string, size_t> nameToIdx;
+    for (size_t i = 0; i < modules.size(); ++i)
+        nameToIdx[modules[i]->name] = i;
+
+    // dependents[i] = list of module indices that depend on module i
+    std::vector<std::vector<size_t>> dependents(modules.size());
+    std::vector<int> inDegree(modules.size(), 0);
+
+    for (size_t i = 0; i < modules.size(); ++i) {
+        const auto& mod = modules[i];
+        for (size_t j = 0; j < mod->getChildCount(); ++j) {
+            auto child = mod->getChild(j);
+            if (!child || child->type != frontend::NodeType::IMPORTS) continue;
+            for (size_t k = 0; k < child->getChildCount(); ++k) {
+                auto fromNode = child->getChild(k);
+                auto it = nameToIdx.find(fromNode->name);
+                if (it != nameToIdx.end() && it->second != i) {
+                    // module i imports from module it->second → it->second must come first
+                    dependents[it->second].push_back(i);
+                    inDegree[i]++;
+                }
+            }
+        }
+    }
+
+    std::queue<size_t> q;
+    for (size_t i = 0; i < modules.size(); ++i)
+        if (inDegree[i] == 0) q.push(i);
+
+    std::vector<frontend::AsnNodePtr> result;
+    while (!q.empty()) {
+        size_t idx = q.front(); q.pop();
+        result.push_back(modules[idx]);
+        for (size_t dep : dependents[idx])
+            if (--inDegree[dep] == 0) q.push(dep);
+    }
+
+    // Append any cyclic/orphan modules
+    if (result.size() < modules.size()) {
+        std::unordered_set<std::string> emitted;
+        for (const auto& m : result) emitted.insert(m->name);
+        for (const auto& m : modules)
+            if (!emitted.count(m->name)) result.push_back(m);
+    }
+    return result;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printUsage(argv[0]);
@@ -155,6 +222,7 @@ int main(int argc, char* argv[]) {
     std::string outputLang = "cpp";
     bool runTests = false;
     bool verbose = false;
+    bool emitJson = false;
     std::vector<std::string> includePaths;
 
     for (int i = 1; i < argc; i++) {
@@ -178,6 +246,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) outputLang = argv[++i];
         } else if (arg == "-I") {
             if (i + 1 < argc) includePaths.push_back(argv[++i]);
+        } else if (arg == "--json") {
+            emitJson = true;
         } else if (arg == "--test") {
             runTests = true;
         } else if (arg == "-v" || arg == "--verbose") {
@@ -271,6 +341,8 @@ int main(int argc, char* argv[]) {
         globalSymbolTable.resolveReferences(all_asts);
         utils::Logger::info("Reference resolution complete.");
 
+        all_asts = topoSortModules(all_asts);
+
         utils::Logger::info("Starting code generation (lang=" + outputLang + ")...");
 
         std::string generatedHeaderCode;
@@ -309,9 +381,11 @@ int main(int argc, char* argv[]) {
                 c_codec.setContext(globalSymbolTable, module_ast->name);
 
                 // Type definitions in the header
+                std::unordered_set<std::string> cEmittedTypes;
                 for (const auto& node : sorted_assignments) {
                     auto typeDefNode = node->getChild(0);
                     if (!typeDefNode) continue;
+                    bool didEmit = true;
                     switch (typeDefNode->type) {
                         case frontend::NodeType::SEQUENCE:
                         case frontend::NodeType::SET:
@@ -345,10 +419,13 @@ int main(int argc, char* argv[]) {
                         default:
                             if (typeDefNode->resolvedName.has_value())
                                 generatedHeaderCode += c_emitter.emitTypedef(node, module_ast->name);
-                            else
+                            else {
                                 utils::Logger::debug("Skipping C type for: " + node->name);
+                                didEmit = false;
+                            }
                             break;
                     }
+                    if (didEmit) cEmittedTypes.insert(node->name);
                 }
 
                 // VALUE_ASSIGNMENT → #define constants
@@ -362,6 +439,7 @@ int main(int argc, char* argv[]) {
                 size_t total = sorted_assignments.size();
                 for (size_t i = 0; i < total; ++i) {
                     const auto& node = sorted_assignments[i];
+                    if (!cEmittedTypes.count(node->name)) continue;
                     utils::Logger::info("  - " + node->name + " (" +
                                         std::to_string(i + 1) + "/" +
                                         std::to_string(total) + ")");
@@ -379,6 +457,8 @@ int main(int argc, char* argv[]) {
             codegen::CppEmitter emitter;
             emitter.setOutputNamespace(outputNamespace);
             codegen::CodecEmitter codec_emitter;
+            // Tracks which types were actually emitted per module (for JSON pass filtering).
+            std::unordered_map<std::string, std::unordered_set<std::string>> moduleEmittedTypes;
 
             generatedHeaderCode += emitter.emitHeaderPreamble(headerGuard);
             generatedHeaderCode += "namespace " + outputNamespace + " {\n\n";
@@ -406,9 +486,11 @@ int main(int argc, char* argv[]) {
 
                 codec_emitter.setContext(globalSymbolTable, module_ast->name);
 
+                std::unordered_set<std::string> emittedTypes;
                 for (const auto& node : sorted_assignments) {
                     auto typeDefNode = node->getChild(0);
                     if (!typeDefNode) continue;
+                    bool didEmit = true;
                     switch (typeDefNode->type) {
                         case frontend::NodeType::SEQUENCE:
                         case frontend::NodeType::SET:
@@ -439,14 +521,35 @@ int main(int argc, char* argv[]) {
                         case frontend::NodeType::ANY_TYPE:
                             generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
                             break;
-                        default:
+                        default: {
+                            auto resolvedDef = typeDefNode->resolvedTypeNode
+                                               ? typeDefNode->resolvedTypeNode : typeDefNode;
                             if (typeDefNode->resolvedName.has_value()) {
                                 generatedHeaderCode += emitter.emitTypedef(node, module_ast->name);
+                            } else if (resolvedDef->type == frontend::NodeType::SEQUENCE ||
+                                       resolvedDef->type == frontend::NodeType::SET) {
+                                generatedHeaderCode += emitter.emitStruct(node, module_ast->name);
+                            } else if (resolvedDef->type == frontend::NodeType::SEQUENCE_OF ||
+                                       resolvedDef->type == frontend::NodeType::SET_OF) {
+                                generatedHeaderCode += emitter.emitSequenceOf(node, module_ast->name);
+                            } else if (resolvedDef->type == frontend::NodeType::CHOICE) {
+                                generatedHeaderCode += emitter.emitChoice(node, module_ast->name);
+                            } else if (resolvedDef->type == frontend::NodeType::ENUMERATION) {
+                                generatedHeaderCode += emitter.emitEnum(node, module_ast->name);
+                            } else if (typeDefNode->type == frontend::NodeType::IDENTIFIER) {
+                                // Parameterized alias (e.g. Foo {params} ::= Bar {params})
+                                // Emit as a using alias of the base type name.
+                                std::string emitted = emitter.emitTypedef(node, module_ast->name);
+                                if (emitted.empty()) { didEmit = false; utils::Logger::debug("Skipping C++ type for: " + node->name); }
+                                else generatedHeaderCode += emitted;
                             } else {
                                 utils::Logger::debug("Skipping C++ type for: " + node->name);
+                                didEmit = false;
                             }
                             break;
+                        }
                     }
+                    if (didEmit) emittedTypes.insert(node->name);
                 }
 
                 for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
@@ -458,6 +561,7 @@ int main(int argc, char* argv[]) {
                 size_t total = sorted_assignments.size();
                 for (size_t i = 0; i < total; ++i) {
                     const auto& node = sorted_assignments[i];
+                    if (!emittedTypes.count(node->name)) continue;
                     utils::Logger::info("  - " + node->name + " (" +
                                         std::to_string(i + 1) + "/" +
                                         std::to_string(total) + ")");
@@ -467,12 +571,63 @@ int main(int argc, char* argv[]) {
                     generatedSourceCode += codec_emitter.emitDecoderDefinition(node, module_ast->name);
                 }
 
+                moduleEmittedTypes[module_ast->name] = emittedTypes;
+
                 generatedHeaderCode += "\n} // namespace " + moduleNamespace + "\n\n";
                 generatedSourceCode += "} // namespace " + moduleNamespace + "\n\n";
             }
 
             generatedHeaderCode += "} // namespace " + outputNamespace + "\n\n#endif // " + headerGuard + "\n";
             generatedSourceCode += "} // namespace " + outputNamespace + "\n";
+
+            // ── Optional: JSON adapter file ──────────────────────────────────
+            if (emitJson) {
+                std::string headerBasename = headerOutputFile;
+                size_t lastSlashJ = headerBasename.find_last_of("/\\");
+                if (lastSlashJ != std::string::npos)
+                    headerBasename = headerBasename.substr(lastSlashJ + 1);
+
+                codegen::JsonEmitter json_emitter;
+                json_emitter.setOutputNamespace(outputNamespace);
+                json_emitter.setGeneratedHeader(headerBasename);
+
+                std::string jsonCode = json_emitter.emitPreamble();
+                jsonCode += "namespace " + outputNamespace + " {\n\n";
+
+                for (const auto& module_ast : all_asts) {
+                    if (!module_ast || module_ast->type != frontend::NodeType::MODULE) continue;
+                    std::string moduleNamespace = codegen::TypeMap::mangleName(module_ast->name);
+
+                    // Re-sort assignments (same order as the C++ pass above).
+                    std::vector<frontend::AsnNodePtr> all_assignments;
+                    for (size_t i = 0; i < module_ast->getChildCount(); ++i) {
+                        auto node = module_ast->getChild(i);
+                        if (node && node->type == frontend::NodeType::ASSIGNMENT &&
+                            node->getChildCount() > 0)
+                            all_assignments.push_back(node);
+                    }
+                    auto sorted_assignments = topoSortAssignments(all_assignments);
+
+                    jsonCode += "namespace " + moduleNamespace + " {\n\n";
+                    const auto& emitted = moduleEmittedTypes[module_ast->name];
+                    for (const auto& node : sorted_assignments) {
+                        if (!emitted.count(node->name)) continue;
+                        jsonCode += json_emitter.emitTypeAdapter(node, module_ast->name);
+                    }
+                    jsonCode += "} // namespace " + moduleNamespace + "\n\n";
+                }
+
+                jsonCode += "} // namespace " + outputNamespace + "\n\n";
+                jsonCode += json_emitter.emitRegisterFunction();
+                jsonCode += "\n";
+
+                std::string jsonOutputFile = outputBaseName + "_json.hpp";
+                if (!utils::FileLoader::saveFile(jsonOutputFile, jsonCode)) {
+                    utils::Logger::error("Failed to write: " + jsonOutputFile);
+                    return 1;
+                }
+                utils::Logger::info("JSON adapters written to: " + jsonOutputFile);
+            }
         }
 
         utils::Logger::info("Writing output to: " + headerOutputFile +

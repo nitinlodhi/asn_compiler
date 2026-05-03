@@ -1,9 +1,37 @@
 #include "codegen/cpp/CppEmitter.h"
 #include "utils/Logger.h"
 #include <algorithm>
+#include <cctype>
 #include <unordered_set>
 
 namespace asn1::codegen {
+
+// Bare (no '.') resolvedNames are either a known ASN.1 primitive (INTEGER → int64_t,
+// etc.) or an unresolved CLASS/IOC template parameter placeholder (TYPE, VALUE …).
+// Apply this after TypeMap::resolvedNameToCppRef when resolvedName had no '.' prefix.
+static inline void fixBareResolvedName(std::string& typeName, TypeMap& typeMap) {
+    // Try primitive mapping first.
+    std::string mapped = typeMap.mapAsnToCppType(typeName);
+    if (mapped != typeName) {
+        typeName = mapped;
+        return;
+    }
+    // Unrecognised bare name: treat as CLASS parameter placeholder → opaque std::any.
+    if (typeName.find("::") == std::string::npos && typeName.find('<') == std::string::npos) {
+        bool allUpper = !typeName.empty() && std::all_of(typeName.begin(), typeName.end(),
+            [](unsigned char c){ return std::isupper(c) || c == '_'; });
+        if (allUpper) typeName = "std::any";
+    }
+}
+
+// Kept for callers that don't need the primitive-mapping path.
+static inline void fixClassTemplateParam(std::string& typeName) {
+    if (typeName.find("::") == std::string::npos && typeName.find('<') == std::string::npos) {
+        bool allUpper = !typeName.empty() && std::all_of(typeName.begin(), typeName.end(),
+            [](unsigned char c){ return std::isupper(c) || c == '_'; });
+        if (allUpper) typeName = "std::any";
+    }
+}
 
 // Replace hyphens/dots with underscores so ASN.1 names become valid C++ identifiers.
 static inline std::string id(const std::string& name) {
@@ -211,7 +239,9 @@ std::string CppEmitter::emitStruct(const frontend::AsnNodePtr& assignmentNode, c
                 std::string innerTypeName;
                 if (optionTypeNode->resolvedName.has_value()) {
                     // Named reference: use namespace-qualified form.
-                    innerTypeName = TypeMap::resolvedNameToCppRef(optionTypeNode->resolvedName.value(), moduleName);
+                    const auto& rn0 = optionTypeNode->resolvedName.value();
+                    innerTypeName = TypeMap::resolvedNameToCppRef(rn0, moduleName);
+                    if (rn0.find('.') == std::string::npos) fixBareResolvedName(innerTypeName, typeMap);
                 } else if (optionTypeNode->type == frontend::NodeType::CHOICE ||
                            optionTypeNode->type == frontend::NodeType::SEQUENCE) {
                     innerTypeName = baseName + "_" + id(optionNode->name) + "_type";
@@ -221,7 +251,9 @@ std::string CppEmitter::emitStruct(const frontend::AsnNodePtr& assignmentNode, c
                     if (effectiveOptionTypeNode->getChildCount() > 0) {
                         auto elemNode = effectiveOptionTypeNode->getChild(0);
                         if (elemNode->resolvedName.has_value()) {
-                            elemType = TypeMap::resolvedNameToCppRef(elemNode->resolvedName.value(), moduleName);
+                            const auto& rn1 = elemNode->resolvedName.value();
+                            elemType = TypeMap::resolvedNameToCppRef(rn1, moduleName);
+                            if (rn1.find('.') == std::string::npos) fixBareResolvedName(elemType, typeMap);
                         } else {
                             std::string et = typeMap.mapAsnToCppType(elemNode->name);
                             if (et != "struct" && et != "enum" && et != "std::vector" &&
@@ -288,7 +320,9 @@ std::string CppEmitter::emitStruct(const frontend::AsnNodePtr& assignmentNode, c
 
         if (typeNode->resolvedName.has_value()) {
             // Named reference: module-qualified if cross-module, bare if same-module.
-            typeName = TypeMap::resolvedNameToCppRef(typeNode->resolvedName.value(), moduleName);
+            const auto& rn2 = typeNode->resolvedName.value();
+            typeName = TypeMap::resolvedNameToCppRef(rn2, moduleName);
+            if (rn2.find('.') == std::string::npos) fixBareResolvedName(typeName, typeMap);
         } else if (effectiveTypeNode && (effectiveTypeNode->type == frontend::NodeType::SEQUENCE ||
                                          effectiveTypeNode->type == frontend::NodeType::SET)) {
             // Inline SEQUENCE/SET: the nested struct is named memberName_type.
@@ -299,7 +333,9 @@ std::string CppEmitter::emitStruct(const frontend::AsnNodePtr& assignmentNode, c
             if (effectiveTypeNode->getChildCount() > 0) {
                 auto elemNode = effectiveTypeNode->getChild(0);
                 if (elemNode->resolvedName.has_value()) {
-                    elemType = TypeMap::resolvedNameToCppRef(elemNode->resolvedName.value(), moduleName);
+                    const auto& rn3 = elemNode->resolvedName.value();
+                    elemType = TypeMap::resolvedNameToCppRef(rn3, moduleName);
+                    if (rn3.find('.') == std::string::npos) fixBareResolvedName(elemType, typeMap);
                 } else if (elemNode->type == frontend::NodeType::CHOICE ||
                            elemNode->type == frontend::NodeType::SEQUENCE ||
                            elemNode->type == frontend::NodeType::SET) {
@@ -325,7 +361,9 @@ std::string CppEmitter::emitStruct(const frontend::AsnNodePtr& assignmentNode, c
                 if (typeNode->getChildCount() > 0) {
                     auto elemNode = typeNode->getChild(0);
                     if (elemNode->resolvedName.has_value()) {
-                        elemType = TypeMap::resolvedNameToCppRef(elemNode->resolvedName.value(), moduleName);
+                        const auto& rn4 = elemNode->resolvedName.value();
+                        elemType = TypeMap::resolvedNameToCppRef(rn4, moduleName);
+                        if (rn4.find('.') == std::string::npos) fixBareResolvedName(elemType, typeMap);
                     } else if (elemNode->type == frontend::NodeType::CHOICE ||
                                elemNode->type == frontend::NodeType::SEQUENCE ||
                                elemNode->type == frontend::NodeType::SET) {
@@ -397,7 +435,7 @@ std::string CppEmitter::emitEnum(const frontend::AsnNodePtr& assignmentNode, con
                 code += formatter.formatCode("//... extension marker\n");
                 continue;
             }
-            std::string line = id(enumerator->name);
+            std::string line = safeId(enumerator->name);
             if (enumerator->value.has_value()) {
                 line += " = " + enumerator->value.value();
             }
@@ -481,7 +519,9 @@ std::string CppEmitter::emitChoice(const frontend::AsnNodePtr& assignmentNode, c
         std::string innerTypeName;
         // Prioritise named references to avoid treating them as inline types.
         if (optionTypeNode->resolvedName.has_value()) {
-            innerTypeName = TypeMap::resolvedNameToCppRef(optionTypeNode->resolvedName.value(), moduleName);
+            const auto& rn5 = optionTypeNode->resolvedName.value();
+            innerTypeName = TypeMap::resolvedNameToCppRef(rn5, moduleName);
+            if (rn5.find('.') == std::string::npos) fixBareResolvedName(innerTypeName, typeMap);
         } else if (optionTypeNode->type == frontend::NodeType::CHOICE ||
                    optionTypeNode->type == frontend::NodeType::SEQUENCE) {
             // Inline CHOICE/SEQUENCE: the nested type we just emitted.
@@ -492,7 +532,9 @@ std::string CppEmitter::emitChoice(const frontend::AsnNodePtr& assignmentNode, c
             if (effectiveOptionTypeNode->getChildCount() > 0) {
                 auto elemNode = effectiveOptionTypeNode->getChild(0);
                 if (elemNode->resolvedName.has_value()) {
-                    elemType = TypeMap::resolvedNameToCppRef(elemNode->resolvedName.value(), moduleName);
+                    const auto& rn6 = elemNode->resolvedName.value();
+                    elemType = TypeMap::resolvedNameToCppRef(rn6, moduleName);
+                    if (rn6.find('.') == std::string::npos) fixBareResolvedName(elemType, typeMap);
                 } else {
                     std::string et = typeMap.mapAsnToCppType(elemNode->name);
                     if (et != "struct" && et != "enum" && et != "std::vector" &&
@@ -550,10 +592,16 @@ std::string CppEmitter::emitTypedef(const frontend::AsnNodePtr& assignmentNode, 
 
     std::string baseType;
     if (typeNode->resolvedName.has_value()) {
-        baseType = TypeMap::resolvedNameToCppRef(typeNode->resolvedName.value(), moduleName);
+        const auto& rn7 = typeNode->resolvedName.value();
+        baseType = TypeMap::resolvedNameToCppRef(rn7, moduleName);
+        if (rn7.find('.') == std::string::npos) fixBareResolvedName(baseType, typeMap);
     } else {
-        baseType = typeMap.mapAsnToCppType(typeNode->name);
+        baseType = id(typeMap.mapAsnToCppType(typeNode->name));
     }
+    if (baseType.empty() || baseType == "struct" || baseType == "enum"
+        || baseType == "std::variant" || baseType == "std::vector"
+        || baseType == "std::any")
+        return "";
     std::string mangledName = id(assignmentNode->name);
     return formatter.formatCode("using " + mangledName + " = " + baseType + ";\n\n");
 }
@@ -571,7 +619,9 @@ std::string CppEmitter::emitSequenceOf(const frontend::AsnNodePtr& assignmentNod
     std::string elementTypeName;
 
     if (elementTypeNode->resolvedName.has_value()) {
-        elementTypeName = TypeMap::resolvedNameToCppRef(elementTypeNode->resolvedName.value(), moduleName);
+        const auto& rn8 = elementTypeNode->resolvedName.value();
+        elementTypeName = TypeMap::resolvedNameToCppRef(rn8, moduleName);
+        if (rn8.find('.') == std::string::npos) fixBareResolvedName(elementTypeName, typeMap);
     } else if (elementTypeNode->type == frontend::NodeType::CHOICE) {
         std::string elemTypeName = mangledName + "_element";
         auto dummyAssignment = std::make_shared<frontend::AsnNode>(
@@ -605,7 +655,9 @@ std::string CppEmitter::emitValueAssignment(const frontend::AsnNodePtr& assignme
 
     std::string cppType;
     if (typeNode->resolvedName.has_value()) {
-        cppType = TypeMap::resolvedNameToCppRef(typeNode->resolvedName.value(), moduleName);
+        const auto& rn9 = typeNode->resolvedName.value();
+        cppType = TypeMap::resolvedNameToCppRef(rn9, moduleName);
+        if (rn9.find('.') == std::string::npos) fixBareResolvedName(cppType, typeMap);
     } else {
         cppType = typeMap.mapAsnToCppType(typeNode->name);
     }

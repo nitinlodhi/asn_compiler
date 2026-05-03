@@ -419,43 +419,23 @@ std::string CodecEmitter::generateSequenceLogic(const frontend::AsnNodePtr& node
             }
             optionalIdx++;
         } else if (member->getChild(0)->definingFieldName.has_value()) {
-            // Special handling for open types (ANY DEFINED BY or parameterized)
+            // IOC table-constrained field.
             const auto& openTypeNode = member->getChild(0);
-            const std::string& defining_field = openTypeNode->definingFieldName.value();
-            code += formatter.formatCode("{\n");
-            formatter.indent();
-            code += formatter.formatCode("BitString open_type_data = UperExtension::decodeOpenType(reader);\n");
-            code += formatter.formatCode("switch (" + varName + "." + defining_field + ") {\n");
-            formatter.indent();
-            for (const auto& pair : openTypeNode->openTypeMap) {
-                long long case_id = pair.first;
-                const auto& type_val_node = pair.second;
-                std::string typeRef = TypeMap::resolvedNameToCppRef(type_val_node->resolvedName.value(), currentModuleName);
-                // Build the decode function call (may be namespace-qualified for cross-module).
-                auto dotPos = type_val_node->resolvedName.value().find('.');
-                std::string decodeFuncName;
-                if (dotPos != std::string::npos) {
-                    std::string mod = type_val_node->resolvedName.value().substr(0, dotPos);
-                    std::string typ = type_val_node->resolvedName.value().substr(dotPos + 1);
-                    std::replace(mod.begin(), mod.end(), '-', '_');
-                    std::replace(typ.begin(), typ.end(), '-', '_');
-                    std::string curMod = currentModuleName;
-                    std::replace(curMod.begin(), curMod.end(), '-', '_');
-                    decodeFuncName = (mod == curMod) ? ("decode_" + typ) : (mod + "::decode_" + typ);
-                } else {
-                    decodeFuncName = "decode_" + typeRef;
-                }
-                code += formatter.formatCode("case " + std::to_string(case_id) + ":\n");
-                formatter.indent();
-                code += formatter.formatCode(varName + "." + id(member->name) + ".emplace<" + typeRef + ">(" + decodeFuncName + "(BitReader(open_type_data.data.data(), open_type_data.data.size())));\n");
-                code += formatter.formatCode("break;\n");
-                formatter.dedent();
+            // If the field resolved to a concrete named type (module.Type), generate a
+            // normal codec call.  Only true OPEN TYPE fields (resolvedName has no '.')
+            // need the open-type encode/decode path.
+            bool isOpenType = !openTypeNode->resolvedName.has_value() ||
+                              openTypeNode->resolvedName.value().find('.') == std::string::npos;
+            if (!isOpenType) {
+                code += generateMemberCodecCall(member, varName + "." + id(member->name), isEncoder);
+            } else if (isEncoder) {
+                // Cannot encode an OPEN TYPE field whose content is opaque (std::any).
+                // Write a zero-length open type wrapper so the stream stays well-formed.
+                code += formatter.formatCode("UperExtension::encodeOpenType(writer, {}); // open type\n");
+            } else {
+                // Decoder: read and discard the open type bytes.
+                code += formatter.formatCode("UperExtension::decodeOpenType(reader); // open type\n");
             }
-            code += formatter.formatCode("default: " + varName + "." + id(member->name) + " = open_type_data; break; // Store raw bytes if type is unknown\n");
-            formatter.dedent();
-            code += formatter.formatCode("}\n");
-            formatter.dedent();
-            code += formatter.formatCode("}\n");
         } else { // Mandatory field
             code += generateMemberCodecCall(member, varName + "." + id(member->name), isEncoder);
         }
@@ -991,6 +971,8 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         formatter.dedent();
         code += formatter.formatCode("}\n");
     } else { // Decoder
+        code += formatter.formatCode("{\n");
+        formatter.indent();
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
@@ -1010,6 +992,8 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         code += formatter.formatCode("for (size_t i = 0; i < length; ++i) {\n");
         formatter.indent();
         code += formatter.formatCode(varName + "[i] = reader.readByte();\n");
+        formatter.dedent();
+        code += formatter.formatCode("}\n");
         formatter.dedent();
         code += formatter.formatCode("}\n");
     }
@@ -1061,6 +1045,8 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
         }
         code += formatter.formatCode("writer.writeBytes(reinterpret_cast<const uint8_t*>(" + varName + ".data()), " + varName + ".size() * 8);\n");
     } else { // Decoder
+        code += formatter.formatCode("{\n");
+        formatter.indent();
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
@@ -1078,6 +1064,8 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
         }
         code += formatter.formatCode(varName + ".resize(length);\n");
         code += formatter.formatCode("reader.readBytes(reinterpret_cast<uint8_t*>(" + varName + ".data()), length * 8);\n");
+        formatter.dedent();
+        code += formatter.formatCode("}\n");
     }
     return code;
 }
@@ -1252,6 +1240,8 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         formatter.dedent();
         code += formatter.formatCode("}\n");
     } else { // Decoder
+        code += formatter.formatCode("{\n");
+        formatter.indent();
         if (!constrained) {
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
@@ -1271,6 +1261,8 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         code += formatter.formatCode("for (size_t i = 0; i < length; ++i) {\n");
         formatter.indent();
         code += generateMemberCodecCall(dummyMember, varName + "[i]", false);
+        formatter.dedent();
+        code += formatter.formatCode("}\n");
         formatter.dedent();
         code += formatter.formatCode("}\n");
     }
