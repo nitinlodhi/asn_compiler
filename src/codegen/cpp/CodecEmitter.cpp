@@ -972,7 +972,10 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             } else {
-                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                std::string szCond = (minSize > 0)
+                    ? varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr
+                    : varName + ".size() > " + maxStr;
+                code += formatter.formatCode("if (" + szCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"OCTET STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -993,7 +996,10 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         } else {
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
-                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                std::string lenCond = (minSize > 0)
+                    ? "length < " + minStr + " || length > " + maxStr
+                    : "length > " + maxStr;
+                code += formatter.formatCode("if (" + lenCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"OCTET STRING SIZE constraint violation: decoded length \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1040,7 +1046,10 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             } else {
-                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                std::string szCond = (minSize > 0)
+                    ? varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr
+                    : varName + ".size() > " + maxStr;
+                code += formatter.formatCode("if (" + szCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"String SIZE constraint violation: length \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1057,7 +1066,10 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
         } else {
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
-                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                std::string lenCond = (minSize > 0)
+                    ? "length < " + minStr + " || length > " + maxStr
+                    : "length > " + maxStr;
+                code += formatter.formatCode("if (" + lenCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"String SIZE constraint violation: decoded length \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1097,7 +1109,10 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             } else {
-                code += formatter.formatCode("if (" + varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr + ") {\n");
+                std::string blCond = (minSize > 0)
+                    ? varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr
+                    : varName + ".bit_length > " + maxStr;
+                code += formatter.formatCode("if (" + blCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"BIT STRING SIZE constraint violation: length \" + std::to_string(" + varName + ".bit_length) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1119,7 +1134,10 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
             if (minSize != maxSize) {
                 // Fixed-size is always valid by construction; ranged size needs an explicit check
                 // against corrupted streams.
-                code += formatter.formatCode("if (" + varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr + ") {\n");
+                std::string blDecCond = (minSize > 0)
+                    ? varName + ".bit_length < " + minStr + " || " + varName + ".bit_length > " + maxStr
+                    : varName + ".bit_length > " + maxStr;
+                code += formatter.formatCode("if (" + blDecCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"BIT STRING SIZE constraint violation: decoded length \" + std::to_string(" + varName + ".bit_length) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1215,7 +1233,10 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             } else {
-                code += formatter.formatCode("if (" + varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr + ") {\n");
+                std::string szCond = (minSize > 0)
+                    ? varName + ".size() < " + minStr + " || " + varName + ".size() > " + maxStr
+                    : varName + ".size() > " + maxStr;
+                code += formatter.formatCode("if (" + szCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"SEQUENCE OF SIZE constraint violation: size \" + std::to_string(" + varName + ".size()) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();
@@ -1236,7 +1257,10 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         } else {
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
-                code += formatter.formatCode("if (length < " + minStr + " || length > " + maxStr + ") {\n");
+                std::string lenCond = (minSize > 0)
+                    ? "length < " + minStr + " || length > " + maxStr
+                    : "length > " + maxStr;
+                code += formatter.formatCode("if (" + lenCond + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"SEQUENCE OF SIZE constraint violation: decoded size \" + std::to_string(length) + \" out of range " + constraintDesc + ".\");\n");
                 formatter.dedent();

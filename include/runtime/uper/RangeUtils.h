@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <string>
 
 namespace asn1::runtime {
 

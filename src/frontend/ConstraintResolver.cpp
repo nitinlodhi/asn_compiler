@@ -4,6 +4,7 @@
 #include "frontend/SymbolTable.h"
 #include <cmath>
 #include <stdexcept>
+#include <algorithm>
 
 namespace asn1::frontend {
 

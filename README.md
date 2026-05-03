@@ -388,3 +388,9 @@ Test project /path/to/build
 - [ ] IMPORTS across multiple schema files at compile time
 - [ ] Full 3GPP NR-RRC hex vector regression suite
 - [ ] Implement codecs for parameterized-type fields (currently emits TODO stub)
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

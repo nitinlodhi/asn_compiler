@@ -233,9 +233,7 @@ std::string CEmitter::emitStruct(const AsnNodePtr& node,
     std::string pre_emit;
     std::string fields;
 
-    // Count optional fields for a comment
     bool has_extension = type_node->hasExtension;
-    int opt_count = 0;
 
     for (size_t i = 0; i < type_node->getChildCount(); ++i) {
         auto member = type_node->getChild(i);
@@ -243,7 +241,6 @@ std::string CEmitter::emitStruct(const AsnNodePtr& node,
         if (member->type != NodeType::ASSIGNMENT) continue;
 
         bool optional = member->isOptional || member->hasDefault;
-        if (optional) opt_count++;
 
         auto eff = member->resolvedTypeNode ? member->resolvedTypeNode : member->getChild(0);
         std::string field_c;

@@ -5,6 +5,8 @@
 #include <cmath>
 #include <sstream>
 #include <unordered_set>
+#include <cstdint>
+#include <cstring>
 
 namespace asn1::codegen {
 
@@ -426,7 +428,10 @@ std::string CCodecEmitter::generateBitStringLogic(const AsnNodePtr& type_node,
             code += "        return -1;\n    }\n";
             code += "    asn1_bw_write_bytes(writer, " + var + ".data, (size_t)" + sv(min_s) + ");\n";
         } else if (constrained) {
-            code += "    if (" + var + ".bit_length < (size_t)" + sv(min_s) + " || " + var + ".bit_length > (size_t)" + sv(max_s) + ") {\n";
+            std::string bl_check = (min_s > 0)
+                ? var + ".bit_length < (size_t)" + sv(min_s) + " || " + var + ".bit_length > (size_t)" + sv(max_s)
+                : var + ".bit_length > (size_t)" + sv(max_s);
+            code += "    if (" + bl_check + ") {\n";
             code += "        char _msg[128];\n";
             code += "        snprintf(_msg, sizeof(_msg), \"BIT STRING SIZE constraint violation: length %zu out of range ["
                     + std::to_string((long long)min_s) + ", " + std::to_string((long long)max_s)
@@ -494,7 +499,10 @@ std::string CCodecEmitter::generateOctetStringLogic(const AsnNodePtr& type_node,
             code += "        return -1;\n    }\n";
             code += loop_enc;
         } else if (constrained) {
-            code += "    if (" + var + ".length < (size_t)" + sv(min_s) + " || " + var + ".length > (size_t)" + sv(max_s) + ") {\n";
+            std::string len_check = (min_s > 0)
+                ? var + ".length < (size_t)" + sv(min_s) + " || " + var + ".length > (size_t)" + sv(max_s)
+                : var + ".length > (size_t)" + sv(max_s);
+            code += "    if (" + len_check + ") {\n";
             code += "        char _msg[128];\n";
             code += "        snprintf(_msg, sizeof(_msg), \"OCTET STRING SIZE constraint violation: length %zu out of range ["
                     + std::to_string((long long)min_s) + ", " + std::to_string((long long)max_s)
@@ -1205,7 +1213,10 @@ std::string CCodecEmitter::generateSequenceOfLogic(const AsnNodePtr& node,
 
     if (is_enc) {
         if (constrained) {
-            code += "    if (value->count < (size_t)" + sv(min_s) + " || value->count > (size_t)" + sv(max_s) + ") {\n";
+            std::string count_check = (min_s > 0)
+                ? "value->count < (size_t)" + sv(min_s) + " || value->count > (size_t)" + sv(max_s)
+                : "value->count > (size_t)" + sv(max_s);
+            code += "    if (" + count_check + ") {\n";
             code += "        char _msg[128];\n";
             code += "        snprintf(_msg, sizeof(_msg), \"SEQUENCE OF SIZE constraint violation: size %zu out of range ["
                     + std::to_string((long long)min_s) + ", " + std::to_string((long long)max_s)
