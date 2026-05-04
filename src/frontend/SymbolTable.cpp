@@ -77,10 +77,13 @@ static void buildOpenTypeMap(
     }
     std::string qualifiedClassName = class_it->second;
     size_t dotPos = qualifiedClassName.find('.');
+    if (dotPos == std::string::npos) return;
     std::string classModuleName = qualifiedClassName.substr(0, dotPos);
     std::string classSymbolName = qualifiedClassName.substr(dotPos + 1);
     auto classAssignment = table.lookupSymbol(classModuleName, classSymbolName);
+    if (!classAssignment) return;
     auto classDefNode = classAssignment->getChild(0);
+    if (!classDefNode) return;
 
     std::string typeFieldName;
     for (const auto& fieldSpec : classDefNode->children) {
@@ -95,13 +98,17 @@ static void buildOpenTypeMap(
     }
 
     auto objectSetNode = objectSetAssignment->getChild(1);
+    if (!objectSetNode) return;
     for (const auto& objectDef : objectSetNode->children) {
         long long id_val = -1;
         AsnNodePtr type_val_node = nullptr;
 
         for (const auto& fieldAssignment : objectDef->children) {
             if (fieldAssignment->name == idFieldName) {
-                id_val = std::stoll(fieldAssignment->getChild(0)->value.value());
+                auto idChild = fieldAssignment->getChild(0);
+                if (idChild && idChild->value.has_value()) {
+                    try { id_val = std::stoll(idChild->value.value()); } catch (...) {}
+                }
             }
             if (fieldAssignment->name == typeFieldName) {
                 type_val_node = fieldAssignment->getChild(0);

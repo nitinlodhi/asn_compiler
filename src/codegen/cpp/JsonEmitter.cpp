@@ -130,12 +130,13 @@ std::string JsonEmitter::emitEnumMacro(const frontend::AsnNodePtr& enumNode,
 
 std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choiceNode,
                                                 const std::string& qualifiedTypeName,
-                                                const std::string& wrapperPrefix) const {
+                                                const std::string& wrapperPrefix) {
     // Collect root alternatives (skip EXTENSION_MARKER).
     struct Alt {
         std::string altName;       // e.g., "nr_SCG" (mangled)
         std::string wrapperType;   // fully-qualified wrapper struct name
         bool isNull = false;       // true if the inner type is std::nullptr_t
+        bool isEmptySeq = false;   // true if the inner type is an empty SEQUENCE {}
     };
     std::vector<Alt> alts;
 
@@ -157,12 +158,24 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
         // fully qualify further – the callers always emit us inside a namespace block.
         a.wrapperType = wrapperPrefix + "_" + a.altName;
 
-        // Detect NULL_TYPE inner field
+        // Detect NULL_TYPE or empty SEQUENCE {} inner field
         auto effectiveTypeNode = optionTypeNode;
         if (optionTypeNode->resolvedTypeNode) effectiveTypeNode = optionTypeNode->resolvedTypeNode;
-        if (!optionTypeNode->resolvedName.has_value() &&
-            effectiveTypeNode->type == frontend::NodeType::NULL_TYPE)
-            a.isNull = true;
+        if (!optionTypeNode->resolvedName.has_value()) {
+            if (effectiveTypeNode->type == frontend::NodeType::NULL_TYPE) {
+                a.isNull = true;
+            } else if (effectiveTypeNode->type == frontend::NodeType::SEQUENCE ||
+                       effectiveTypeNode->type == frontend::NodeType::SET) {
+                // Count non-extension-marker children to detect SEQUENCE {}
+                size_t memberCount = 0;
+                for (size_t j = 0; j < effectiveTypeNode->getChildCount(); ++j) {
+                    auto c = effectiveTypeNode->getChild(j);
+                    if (c && c->type != frontend::NodeType::EXTENSION_MARKER)
+                        ++memberCount;
+                }
+                if (memberCount == 0) a.isEmptySeq = true;
+            }
+        }
 
         alts.push_back(std::move(a));
     }
@@ -170,6 +183,43 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
     bool hasExtension = choiceNode->hasExtension;
 
     std::string code;
+
+    // ── Pre-pass: emit adapters for inline nested types in alternatives ───────
+    // Mirrors the pre-pass in emitStructAdapterImpl so that a CHOICE with
+    // an alternative like "c1 CHOICE {...}" or "ext SEQUENCE {...}" emits the
+    // inner adapter before the outer one references it.
+    for (size_t i = 0; i < choiceNode->getChildCount(); ++i) {
+        auto optionNode = choiceNode->getChild(i);
+        if (!optionNode || optionNode->type == frontend::NodeType::EXTENSION_MARKER) continue;
+        if (optionNode->type != frontend::NodeType::ASSIGNMENT) continue;
+        auto optionTypeNode = optionNode->getChild(0);
+        if (!optionTypeNode || optionTypeNode->resolvedName.has_value()) continue;
+        auto effNode = optionTypeNode->resolvedTypeNode ? optionTypeNode->resolvedTypeNode : optionTypeNode;
+        if (!effNode) continue;
+        const std::string altId = id(optionNode->name);
+        if (effNode->type == frontend::NodeType::CHOICE) {
+            // CppEmitter names inner CHOICE wrappers as: outer_altId_type_innerAltId
+            // so both qualifiedTypeName and wrapperPrefix use the "_type" suffix.
+            const std::string innerTypeName  = wrapperPrefix + "_" + altId + "_type";
+            const std::string innerWrapperPfx = innerTypeName;
+            code += emitChoiceAdapterImpl(effNode, innerTypeName, innerWrapperPfx);
+        } else if ((effNode->type == frontend::NodeType::SEQUENCE ||
+                    effNode->type == frontend::NodeType::SET)) {
+            // Only non-empty SEQUENCEs need a struct adapter.
+            size_t memberCount = 0;
+            for (size_t j = 0; j < effNode->getChildCount(); ++j) {
+                auto c = effNode->getChild(j);
+                if (c && c->type != frontend::NodeType::EXTENSION_MARKER) ++memberCount;
+            }
+            if (memberCount > 0) {
+                const std::string innerTypeName = wrapperPrefix + "_" + altId + "_type";
+                auto dummy = std::make_shared<frontend::AsnNode>(
+                    frontend::NodeType::ASSIGNMENT, altId + "_type", effNode->location);
+                dummy->addChild(effNode);
+                code += emitStructAdapterImpl(dummy, "", innerTypeName);
+            }
+        }
+    }
 
     // ── to_json ──────────────────────────────────────────────────────────────
     // Format: {"altName": value}  (single-key object, key = alternative name)
@@ -181,6 +231,8 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
         code += "        if constexpr (std::is_same_v<T, " + a.wrapperType + ">) {\n";
         if (a.isNull) {
             code += "            j = nlohmann::json{{\"" + a.altName + "\", nullptr}};\n";
+        } else if (a.isEmptySeq) {
+            code += "            j = nlohmann::json{{\"" + a.altName + "\", nlohmann::json::object()}};\n";
         } else {
             code += "            j = nlohmann::json{{\"" + a.altName + "\", alt." + safeId(a.altName) + "}};\n";
         }
@@ -204,6 +256,8 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
         code += "        " + a.wrapperType + " alt;\n";
         if (a.isNull) {
             code += "        // NULL type – no value to decode\n";
+        } else if (a.isEmptySeq) {
+            code += "        // empty SEQUENCE {} – no fields to decode\n";
         } else {
             code += "        j.at(\"" + a.altName + "\").get_to(alt." + safeId(a.altName) + ");\n";
         }
@@ -294,8 +348,9 @@ std::string JsonEmitter::emitStructAdapterImpl(const frontend::AsnNodePtr& assig
                 if (!elemNode->resolvedName.has_value()) {
                     const std::string elemTypeName = structQualifiedName + "::" + memberIdName + "_element_type";
                     if (elemNode->type == frontend::NodeType::CHOICE) {
-                        const std::string elemWrapperPrefix = structQualifiedName + "::" + memberIdName + "_element";
-                        code += emitChoiceAdapterImpl(elemNode, elemTypeName, elemWrapperPrefix);
+                        // CppEmitter names element CHOICE wrappers as: elemTypeName_altName
+                        // (e.g. sib_TypeAndInfo_element_type_sib2), so wrapperPrefix == elemTypeName.
+                        code += emitChoiceAdapterImpl(elemNode, elemTypeName, elemTypeName);
                     } else if (elemNode->type == frontend::NodeType::SEQUENCE ||
                                elemNode->type == frontend::NodeType::SET) {
                         std::string nestedName = memberIdName + "_element_type";
@@ -435,6 +490,11 @@ std::string JsonEmitter::emitTypeAdapter(const frontend::AsnNodePtr& assignmentN
         }
 
         case frontend::NodeType::ENUMERATION: {
+            // Skip if this is a typedef alias to another enum (e.g. "Foo ::= Bar").
+            // The C++ "using Foo = Bar;" alias reuses Bar's JSON adapter automatically;
+            // emitting a second NLOHMANN_JSON_SERIALIZE_ENUM for Foo would redefine
+            // the same template specialisation and cause a compilation error.
+            if (typeDefNode->resolvedName.has_value()) return "";
             return emitEnumMacro(effectiveTypeNode, mangledName);
         }
 

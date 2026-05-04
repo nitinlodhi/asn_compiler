@@ -36,7 +36,7 @@ class JsonEmitter {
     //    or "ParentStruct::fieldName" – note: NOT the _type suffix)
     std::string emitChoiceAdapterImpl(const frontend::AsnNodePtr& choiceNode,
                                        const std::string& qualifiedTypeName,
-                                       const std::string& wrapperPrefix) const;
+                                       const std::string& wrapperPrefix);
 
     // Emit inline to_json / from_json for a SEQUENCE/SET struct.
     // assignmentNode->name is the simple mangled struct name;

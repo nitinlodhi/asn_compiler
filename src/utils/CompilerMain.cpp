@@ -110,7 +110,14 @@ static std::vector<frontend::AsnNodePtr> topoSortAssignments(
             if (nameToNode.count(node->name) && node->name != owner)
                 depMap[owner].insert(node->name);
         }
-        for (const auto& c : node->children)    collect(c, owner, visited);
+        for (const auto& c : node->children) {
+            // OCTET STRING (CONTAINING X) — X is a wire-format annotation, not a
+            // structural dependency; skip it exactly as the resolver does.
+            if (node->type == frontend::NodeType::OCTET_STRING &&
+                c->type == frontend::NodeType::CONSTRAINT && c->name == "Containing")
+                continue;
+            collect(c, owner, visited);
+        }
         for (const auto& p : node->parameters)  collect(p, owner, visited);
     };
 
@@ -279,6 +286,139 @@ static std::string buildTypeRef(const frontend::AsnNodePtr& typeNode,
     return "\"" + nodeKindStr(eff->type) + "\"";
 }
 
+// Resolve the element kind/ref for a SEQUENCE_OF element node.
+// When the element is a parameterised IDENTIFIER whose resolvedName isn't set
+// (e.g. ProtocolIE-Field after parameter substitution), fall back to a linear
+// search of all module ASTs by the node's own name.
+static std::pair<std::string,std::string> resolveSeqOfElem(
+    const frontend::AsnNodePtr& elemNode,
+    const std::string& moduleName,
+    const std::string& inlineHint,
+    const std::vector<frontend::AsnNodePtr>& all_asts)
+{
+    auto elemEff = elemNode->resolvedTypeNode ? elemNode->resolvedTypeNode : elemNode;
+    std::string eKind = nodeKindStr(elemEff->type);
+    std::string eRef  = buildTypeRef(elemNode, moduleName, inlineHint);
+
+    if (eKind == "UNKNOWN" &&
+        elemNode->type == frontend::NodeType::IDENTIFIER &&
+        !elemNode->name.empty()) {
+        for (const auto& mast : all_asts) {
+            if (!mast || mast->type != frontend::NodeType::MODULE) continue;
+            for (size_t ci = 0; ci < mast->getChildCount(); ++ci) {
+                auto child = mast->getChild(ci);
+                if (!child || child->type != frontend::NodeType::ASSIGNMENT) continue;
+                if (child->name != elemNode->name || child->getChildCount() == 0) continue;
+                auto cDef = child->getChild(0);
+                auto cEff = cDef->resolvedTypeNode ? cDef->resolvedTypeNode : cDef;
+                eKind = nodeKindStr(cEff->type);
+                std::string mod = codegen::TypeMap::mangleName(mast->name);
+                std::string nm  = codegen::TypeMap::mangleName(elemNode->name);
+                eRef = "\"" + jsonEscape(mod + "::" + nm) + "\"";
+                goto done;
+            }
+        }
+        done:;
+    }
+    return {eKind, eRef};
+}
+
+// Look up an integer value assigned to a named constant (e.g. id-xxx INTEGER ::= 42).
+static int lookupIdValue(const std::string& idName,
+                         const std::vector<frontend::AsnNodePtr>& all_asts)
+{
+    for (const auto& mast : all_asts) {
+        if (!mast || mast->type != frontend::NodeType::MODULE) continue;
+        for (size_t ci = 0; ci < mast->getChildCount(); ++ci) {
+            auto child = mast->getChild(ci);
+            if (!child || child->type != frontend::NodeType::VALUE_ASSIGNMENT) continue;
+            if (child->name != idName) continue;
+            // Try node->value first, then child(1)->value (from ProtocolIE-ID ::= N form)
+            if (child->value.has_value()) {
+                try { return std::stoi(child->value.value()); } catch (...) {}
+            }
+            // child(0) = type, child(1) = value node
+            if (child->getChildCount() >= 2) {
+                auto valNode = child->getChild(1);
+                if (valNode && valNode->value.has_value()) {
+                    try { return std::stoi(valNode->value.value()); } catch (...) {}
+                }
+                // Also try child(1)->name for plain integer nodes
+                if (valNode && !valNode->name.empty()) {
+                    try { return std::stoi(valNode->name); } catch (...) {}
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+// Find an OBJECT_SET_ASSIGNMENT node by name across all modules.
+static frontend::AsnNodePtr findObjectSetAssignment(
+    const std::string& setName,
+    const std::vector<frontend::AsnNodePtr>& all_asts)
+{
+    for (const auto& mast : all_asts) {
+        if (!mast || mast->type != frontend::NodeType::MODULE) continue;
+        for (size_t ci = 0; ci < mast->getChildCount(); ++ci) {
+            auto child = mast->getChild(ci);
+            if (!child || child->type != frontend::NodeType::OBJECT_SET_ASSIGNMENT) continue;
+            if (child->name == setName) return child;
+        }
+    }
+    return nullptr;
+}
+
+// Emit "ies":[...] for a SEQUENCE_OF field whose type node has an IE set parameter.
+static void emitIeArray(std::ostringstream& out,
+                        const frontend::AsnNodePtr& mTypeNode,
+                        const std::vector<frontend::AsnNodePtr>& all_asts)
+{
+    if (mTypeNode->parameters.empty()) return;
+    std::string ieSetName = mTypeNode->parameters[0]->name;
+    if (ieSetName.empty()) return;
+    auto setNode = findObjectSetAssignment(ieSetName, all_asts);
+    if (!setNode) return;
+
+    // The last child of OBJECT_SET_ASSIGNMENT is the VALUE_NODE("OBJECT_SET") body.
+    // Earlier children may be class-ref or type nodes.
+    frontend::AsnNodePtr setBody;
+    for (int ci = (int)setNode->getChildCount() - 1; ci >= 0; --ci) {
+        auto c = setNode->getChild(ci);
+        if (c && c->type == frontend::NodeType::VALUE_NODE) { setBody = c; break; }
+    }
+    if (!setBody) return;
+
+    out << ",\"ies\":[";
+    bool firstIe = true;
+    for (size_t oi = 0; oi < setBody->getChildCount(); ++oi) {
+        auto objDef = setBody->getChild(oi);
+        if (!objDef || objDef->type != frontend::NodeType::OBJECT_DEFINITION) continue;
+        std::string ieIdName, ieCrit, ieTypeName, iePresence;
+        for (size_t fi = 0; fi < objDef->getChildCount(); ++fi) {
+            auto fa = objDef->getChild(fi);
+            if (!fa || fa->type != frontend::NodeType::ASSIGNMENT ||
+                fa->getChildCount() == 0) continue;
+            auto fVal = fa->getChild(0);
+            if (!fVal) continue;
+            if      (fa->name == "id")          ieIdName  = fVal->name;
+            else if (fa->name == "criticality") ieCrit    = fVal->name;
+            else if (fa->name == "Value")       ieTypeName = fVal->name;
+            else if (fa->name == "presence")    iePresence = fVal->name;
+        }
+        if (ieTypeName.empty()) continue;
+        int ieIdVal = lookupIdValue(ieIdName, all_asts);
+        if (!firstIe) out << ",";
+        firstIe = false;
+        out << "{\"id\":" << ieIdVal
+            << ",\"id_name\":\"" << jsonEscape(ieIdName) << "\""
+            << ",\"criticality\":\"" << jsonEscape(ieCrit) << "\""
+            << ",\"type\":\"" << jsonEscape(ieTypeName) << "\""
+            << ",\"presence\":\"" << jsonEscape(iePresence) << "\"}";
+    }
+    out << "]";
+}
+
 // Build JSON schema for all emitted types.
 static std::string buildSchemaJson(
     const std::vector<frontend::AsnNodePtr>& all_asts,
@@ -385,13 +525,13 @@ static std::string buildSchemaJson(
                                mEff->type == frontend::NodeType::SET_OF) {
                         if (mEff->getChildCount() > 0) {
                             auto elemNode = mEff->getChild(0);
-                            auto elemEff  = elemNode->resolvedTypeNode ? elemNode->resolvedTypeNode : elemNode;
-                            std::string eKind = nodeKindStr(elemEff->type);
-                            std::string eRef  = buildTypeRef(elemNode, module_ast->name,
-                                                              key + "::" + fName + "_element");
+                            auto [eKind, eRef] = resolveSeqOfElem(
+                                elemNode, module_ast->name,
+                                key + "::" + fName + "_element", all_asts);
                             out << ",\"element_kind\":\"" << eKind
                                 << "\",\"element_type\":" << eRef;
                         }
+                        emitIeArray(out, mTypeNode, all_asts);
                     }
                     // Emit ASN.1 DEFAULT value so the frontend can pre-fill the input.
                     if (member->hasDefault && member->value.has_value()) {
@@ -449,9 +589,8 @@ static std::string buildSchemaJson(
                        eff->type == frontend::NodeType::SET_OF) {
                 if (eff->getChildCount() > 0) {
                     auto elemNode = eff->getChild(0);
-                    auto elemEff  = elemNode->resolvedTypeNode ? elemNode->resolvedTypeNode : elemNode;
-                    std::string eKind = nodeKindStr(elemEff->type);
-                    std::string eRef  = buildTypeRef(elemNode, module_ast->name, key + "_element");
+                    auto [eKind, eRef] = resolveSeqOfElem(
+                        elemNode, module_ast->name, key + "_element", all_asts);
                     out << ",\n      \"element_kind\": \"" << eKind << "\"";
                     out << ",\n      \"element_type\": " << eRef;
                 }

@@ -1,5 +1,6 @@
 #include "frontend/AsnParser.h"
 #include <cctype>
+#include <unordered_set>
 
 namespace asn1::frontend {
 
@@ -194,23 +195,49 @@ AsnNodePtr AsnParser::parseAssignment() {
         // Check for uppercase object set assignment: UpperName ClassName ::= { ... }
         // These differ from type assignments in that the next token is not ::=
         if (!check(TokenType::ASSIGNMENT)) {
-            // Skip class name and any tokens until ::=
+            // Collect the class name (the token between the assignment name and ::=)
+            // then parse the body as an object set if applicable.
+            AsnNodePtr classRef;
+            if (check(TokenType::IDENTIFIER)) {
+                Token classToken = advance();
+                classRef = std::make_shared<AsnNode>(NodeType::IDENTIFIER, classToken.lexeme, classToken.location);
+            }
+            // Skip any remaining tokens until ::=
             while (!check(TokenType::ASSIGNMENT) && !check(TokenType::END_OF_FILE) && !check(TokenType::END)) {
                 advance();
             }
             if (!check(TokenType::ASSIGNMENT)) return nullptr;
             consume(TokenType::ASSIGNMENT, "Expected '::='");
-            // Skip the body (object set or single object)
+
             if (check(TokenType::LBRACE)) {
-                int depth = 1;
-                advance();
-                while (depth > 0 && !check(TokenType::END_OF_FILE)) {
-                    if (check(TokenType::LBRACE)) depth++;
-                    else if (check(TokenType::RBRACE)) depth--;
-                    advance();
+                // Peek inside: { followed by { or ... → object set; otherwise single object
+                size_t savedPos = current;
+                advance(); // consume outer '{'
+                bool isObjectSet = check(TokenType::LBRACE) || check(TokenType::ELLIPSIS);
+                current = savedPos; // restore
+
+                if (isObjectSet) {
+                    auto objectSet = parseObjectSet();
+                    auto assignment = std::make_shared<AsnNode>(
+                        NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+                    if (classRef) assignment->addChild(classRef);
+                    assignment->addChild(objectSet);
+                    return assignment;
+                } else {
+                    // Single WITH SYNTAX object — depth-skip
+                    int depth = 1;
+                    advance(); // consume '{'
+                    while (depth > 0 && !check(TokenType::END_OF_FILE)) {
+                        if (check(TokenType::LBRACE)) depth++;
+                        else if (check(TokenType::RBRACE)) depth--;
+                        advance();
+                    }
                 }
             }
-            return std::make_shared<AsnNode>(NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+            auto assignment = std::make_shared<AsnNode>(
+                NodeType::OBJECT_SET_ASSIGNMENT, nameToken.lexeme, nameToken.location);
+            if (classRef) assignment->addChild(classRef);
+            return assignment;
         }
 
         // This is a Type Assignment: MyType ::= INTEGER
@@ -662,8 +689,49 @@ AsnNodePtr AsnParser::parseObjectSet() {
                 }
                 if (check(TokenType::RBRACE)) advance(); // consume closing '}'
                 setNode->addChild(objectNode);
+            } else if (check(TokenType::IDENTIFIER) && peek().lexeme == "ID") {
+                // WITH SYNTAX PROTOCOL-IES style:
+                //   ID <id-ref> CRITICALITY <crit> TYPE <TypeRef> PRESENCE <pres>
+                // Store all values as VALUE_NODE (not IDENTIFIER) so the type resolver
+                // doesn't try to look up criticality/presence strings as type references.
+                static const std::unordered_set<std::string> kSyntaxKw =
+                    {"ID", "CRITICALITY", "TYPE", "PRESENCE"};
+                auto objectNode = std::make_shared<AsnNode>(
+                    NodeType::OBJECT_DEFINITION, "OBJECT", saved.location);
+                std::string curField;
+                while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+                    if (check(TokenType::IDENTIFIER) && kSyntaxKw.count(peek().lexeme)) {
+                        curField = advance().lexeme; // consume keyword
+                    } else if (check(TokenType::IDENTIFIER) && !curField.empty()) {
+                        Token val = advance();
+                        std::string fieldName =
+                            (curField == "ID")          ? "id" :
+                            (curField == "CRITICALITY") ? "criticality" :
+                            (curField == "TYPE")        ? "Value" :
+                            (curField == "PRESENCE")    ? "presence" : curField;
+                        auto fa = std::make_shared<AsnNode>(
+                            NodeType::ASSIGNMENT, fieldName, val.location);
+                        // Use VALUE_NODE so the type-reference resolver ignores these strings
+                        fa->addChild(std::make_shared<AsnNode>(
+                            NodeType::VALUE_NODE, val.lexeme, val.location));
+                        objectNode->addChild(fa);
+                        // TYPE may have constraints/params — skip until next keyword or '}'
+                        if (curField == "TYPE") {
+                            while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+                                if (check(TokenType::IDENTIFIER) &&
+                                    kSyntaxKw.count(peek().lexeme)) break;
+                                advance();
+                            }
+                        }
+                        curField.clear();
+                    } else {
+                        advance(); // skip unexpected
+                    }
+                }
+                if (check(TokenType::RBRACE)) advance(); // consume closing '}'
+                setNode->addChild(objectNode);
             } else {
-                // WITH SYNTAX style — skip remaining tokens until matching '}'
+                // Unknown block style — skip remaining tokens until matching '}'
                 int depth = 1;
                 while (depth > 0 && !check(TokenType::END_OF_FILE)) {
                     if (check(TokenType::LBRACE)) depth++;
