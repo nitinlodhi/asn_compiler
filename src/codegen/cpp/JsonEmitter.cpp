@@ -172,6 +172,7 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
     std::string code;
 
     // ── to_json ──────────────────────────────────────────────────────────────
+    // Format: {"altName": value}  (single-key object, key = alternative name)
     code += "inline void to_json(nlohmann::json& j, const " + qualifiedTypeName + "& v) {\n";
     code += "    std::visit([&j](const auto& alt) {\n";
     code += "        using T = std::decay_t<decltype(alt)>;\n";
@@ -179,9 +180,9 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
         const auto& a = alts[i];
         code += "        if constexpr (std::is_same_v<T, " + a.wrapperType + ">) {\n";
         if (a.isNull) {
-            code += "            j = nlohmann::json{{\"type\", \"" + a.altName + "\"}, {\"value\", nullptr}};\n";
+            code += "            j = nlohmann::json{{\"" + a.altName + "\", nullptr}};\n";
         } else {
-            code += "            j = nlohmann::json{{\"type\", \"" + a.altName + "\"}, {\"value\", alt." + safeId(a.altName) + "}};\n";
+            code += "            j = nlohmann::json{{\"" + a.altName + "\", alt." + safeId(a.altName) + "}};\n";
         }
         code += "        } else\n";
     }
@@ -196,23 +197,22 @@ std::string JsonEmitter::emitChoiceAdapterImpl(const frontend::AsnNodePtr& choic
     code += "}\n\n";
 
     // ── from_json ─────────────────────────────────────────────────────────────
+    // Format: {"altName": value}  — check each known alternative key in turn.
     code += "inline void from_json(const nlohmann::json& j, " + qualifiedTypeName + "& v) {\n";
-    code += "    if (!j.contains(\"type\")) return;\n";
-    code += "    const std::string& type_str = j.at(\"type\").get_ref<const std::string&>();\n";
     for (const auto& a : alts) {
-        code += "    if (type_str == \"" + a.altName + "\") {\n";
+        code += "    if (j.contains(\"" + a.altName + "\")) {\n";
         code += "        " + a.wrapperType + " alt;\n";
         if (a.isNull) {
             code += "        // NULL type – no value to decode\n";
         } else {
-            code += "        j.at(\"value\").get_to(alt." + safeId(a.altName) + ");\n";
+            code += "        j.at(\"" + a.altName + "\").get_to(alt." + safeId(a.altName) + ");\n";
         }
         code += "        v = std::move(alt);\n";
         code += "        return;\n";
         code += "    }\n";
     }
-    // Unknown type string: leave v unchanged (covers ExtensionValue and future extensions)
-    code += "    // Unknown type string – leave v unchanged\n";
+    // Unknown key: leave v unchanged (covers ExtensionValue and future extensions)
+    code += "    // Unknown alternative – leave v unchanged\n";
     code += "}\n\n";
 
     return code;
