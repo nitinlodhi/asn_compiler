@@ -393,6 +393,21 @@ static std::string buildSchemaJson(
                                 << "\",\"element_type\":" << eRef;
                         }
                     }
+                    // Emit ASN.1 DEFAULT value so the frontend can pre-fill the input.
+                    if (member->hasDefault && member->value.has_value()) {
+                        const std::string& dv = member->value.value();
+                        if (!dv.empty() && dv.front() == '"') {
+                            // String literal stored as "\"text\"" — strip the C++ quotes.
+                            std::string stripped = dv.substr(1, dv.size() - 2);
+                            out << ",\"default\":\"" << jsonEscape(stripped) << "\"";
+                        } else if (member->defaultValueIsIdentifier) {
+                            // Enum identifier — emit as JSON string.
+                            out << ",\"default\":\"" << jsonEscape(dv) << "\"";
+                        } else {
+                            // Numeric — emit as JSON number.
+                            out << ",\"default\":" << dv;
+                        }
+                    }
                     out << "}";
                 }
                 out << "\n      ]";
