@@ -1,4 +1,5 @@
 #include <iostream>
+#include <sstream>
 #include <cstring>
 #include <algorithm>
 #include <queue>
@@ -31,6 +32,7 @@ void printUsage(const char* programName) {
               << "  -n, --namespace <ns>  C++ namespace (default: asn1::generated)\n"
               << "  --lang <cpp|c>        Output language (default: cpp)\n"
               << "  --json                Also emit <base>_json.hpp with nlohmann/json adapters\n"
+              << "  --schema              Also emit <base>_schema.json with type definitions\n"
               << "  --test                Run validation tests\n"
               << "  -v, --verbose         Enable verbose output\n"
               << "  -h, --help            Show this help message\n";
@@ -208,6 +210,245 @@ static std::vector<frontend::AsnNodePtr> topoSortModules(
     return result;
 }
 
+// ── Schema JSON builder ───────────────────────────────────────────────────────
+
+static std::string jsonEscape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (c == '"')  { out += "\\\""; }
+        else if (c == '\\') { out += "\\\\"; }
+        else if (c == '\n') { out += "\\n"; }
+        else if (c == '\r') { out += "\\r"; }
+        else if (c == '\t') { out += "\\t"; }
+        else out += c;
+    }
+    return out;
+}
+
+static std::string nodeKindStr(frontend::NodeType t) {
+    using NT = frontend::NodeType;
+    switch (t) {
+        case NT::SEQUENCE:       return "SEQUENCE";
+        case NT::SET:            return "SET";
+        case NT::SEQUENCE_OF:    return "SEQUENCE_OF";
+        case NT::SET_OF:         return "SET_OF";
+        case NT::CHOICE:         return "CHOICE";
+        case NT::ENUMERATION:    return "ENUMERATION";
+        case NT::INTEGER:        return "INTEGER";
+        case NT::BOOLEAN:        return "BOOLEAN";
+        case NT::OCTET_STRING:   return "OCTET_STRING";
+        case NT::BIT_STRING:     return "BIT_STRING";
+        case NT::UTF8_STRING:
+        case NT::PRINTABLE_STRING:
+        case NT::VISIBLE_STRING:
+        case NT::IA5_STRING:
+        case NT::NUMERIC_STRING: return "STRING";
+        case NT::NULL_TYPE:      return "NULL";
+        case NT::REAL:           return "REAL";
+        case NT::OBJECT_IDENTIFIER: return "OID";
+        case NT::ANY_TYPE:       return "ANY";
+        default:                 return "UNKNOWN";
+    }
+}
+
+static std::string buildTypeRef(const frontend::AsnNodePtr& typeNode,
+                                  const std::string& moduleName,
+                                  const std::string& inlineHint = "") {
+    if (!typeNode) return "\"\"";
+    if (typeNode->resolvedName.has_value()) {
+        const auto& rn = typeNode->resolvedName.value();
+        auto dot = rn.find('.');
+        if (dot != std::string::npos) {
+            std::string mod = rn.substr(0, dot);
+            std::string nm  = rn.substr(dot + 1);
+            std::replace(mod.begin(), mod.end(), '-', '_');
+            std::replace(nm.begin(),  nm.end(),  '-', '_');
+            std::string cur = moduleName;
+            std::replace(cur.begin(), cur.end(), '-', '_');
+            if (mod == cur)
+                return "\"" + jsonEscape(cur + "::" + nm) + "\"";
+            return "\"" + jsonEscape(mod + "::" + nm) + "\"";
+        }
+        // bare name (primitive / CLASS param)
+        return "\"" + jsonEscape(rn) + "\"";
+    }
+    if (!inlineHint.empty())
+        return "\"" + jsonEscape(inlineHint) + "\"";
+    auto eff = typeNode->resolvedTypeNode ? typeNode->resolvedTypeNode : typeNode;
+    return "\"" + nodeKindStr(eff->type) + "\"";
+}
+
+// Build JSON schema for all emitted types.
+static std::string buildSchemaJson(
+    const std::vector<frontend::AsnNodePtr>& all_asts,
+    const std::unordered_map<std::string,
+                             std::unordered_set<std::string>>& moduleEmittedTypes)
+{
+    std::ostringstream out;
+    out << "{\n  \"types\": [\n";
+    bool firstType = true;
+
+    for (const auto& module_ast : all_asts) {
+        if (!module_ast || module_ast->type != frontend::NodeType::MODULE) continue;
+        std::string modName = codegen::TypeMap::mangleName(module_ast->name);
+        const auto& emitted = moduleEmittedTypes.count(module_ast->name)
+                              ? moduleEmittedTypes.at(module_ast->name)
+                              : std::unordered_set<std::string>{};
+
+        for (size_t ci = 0; ci < module_ast->getChildCount(); ++ci) {
+            auto node = module_ast->getChild(ci);
+            if (!node || node->type != frontend::NodeType::ASSIGNMENT ||
+                node->getChildCount() == 0) continue;
+            if (!emitted.count(node->name)) continue;
+
+            auto typeDef = node->getChild(0);
+            if (!typeDef) continue;
+            auto eff = typeDef->resolvedTypeNode ? typeDef->resolvedTypeNode : typeDef;
+
+            std::string mangledName = codegen::TypeMap::mangleName(node->name);
+            std::string key = modName + "::" + mangledName;
+            std::string kind = nodeKindStr(eff->type);
+            // For IDENTIFIER references (typedef), pick up the effective kind
+            if (eff->type == frontend::NodeType::IDENTIFIER) kind = "ALIAS";
+
+            if (!firstType) out << ",\n";
+            firstType = false;
+            out << "    {\n";
+            out << "      \"key\": \"" << jsonEscape(key) << "\",\n";
+            out << "      \"module\": \"" << jsonEscape(modName) << "\",\n";
+            out << "      \"name\": \"" << jsonEscape(mangledName) << "\",\n";
+            out << "      \"kind\": \"" << kind << "\"";
+
+            if (eff->type == frontend::NodeType::SEQUENCE ||
+                eff->type == frontend::NodeType::SET) {
+                out << ",\n      \"fields\": [";
+                bool firstField = true;
+                bool inExt = false;
+                for (size_t fi = 0; fi < eff->getChildCount(); ++fi) {
+                    auto member = eff->getChild(fi);
+                    if (!member) continue;
+                    if (member->type == frontend::NodeType::EXTENSION_MARKER) {
+                        inExt = true; continue;
+                    }
+                    if (member->type != frontend::NodeType::ASSIGNMENT) continue;
+                    auto mTypeNode = member->getChild(0);
+                    if (!mTypeNode) continue;
+                    auto mEff = mTypeNode->resolvedTypeNode ? mTypeNode->resolvedTypeNode : mTypeNode;
+                    std::string fName = codegen::TypeMap::mangleName(member->name);
+                    std::string fKind = nodeKindStr(mEff->type);
+                    std::string fRef  = buildTypeRef(mTypeNode, module_ast->name,
+                                                     key + "::" + fName + "_type");
+                    if (!firstField) out << ",";
+                    firstField = false;
+                    out << "\n        {";
+                    out << "\"name\":\"" << jsonEscape(fName) << "\",";
+                    out << "\"json_key\":\"" << jsonEscape(member->name) << "\",";
+                    out << "\"type_ref\":" << fRef << ",";
+                    out << "\"kind\":\"" << fKind << "\",";
+                    out << "\"optional\":" << (member->isOptional || inExt ? "true" : "false");
+
+                    // Embed inline type details so the frontend is self-contained.
+                    if (mEff->type == frontend::NodeType::ENUMERATION) {
+                        out << ",\"values\":[";
+                        bool fv = true;
+                        for (size_t vi = 0; vi < mEff->getChildCount(); ++vi) {
+                            auto en = mEff->getChild(vi);
+                            if (!en || en->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                            if (!fv) out << ",";
+                            fv = false;
+                            out << "\"" << jsonEscape(codegen::TypeMap::mangleName(en->name)) << "\"";
+                        }
+                        out << "]";
+                    } else if (mEff->type == frontend::NodeType::CHOICE) {
+                        out << ",\"alternatives\":[";
+                        bool fa = true;
+                        for (size_t ai = 0; ai < mEff->getChildCount(); ++ai) {
+                            auto alt = mEff->getChild(ai);
+                            if (!alt || alt->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                            if (alt->type != frontend::NodeType::ASSIGNMENT) continue;
+                            auto aTN = alt->getChild(0);
+                            if (!aTN) continue;
+                            auto aEff = aTN->resolvedTypeNode ? aTN->resolvedTypeNode : aTN;
+                            std::string aName = codegen::TypeMap::mangleName(alt->name);
+                            std::string aKind = nodeKindStr(aEff->type);
+                            std::string aRef  = buildTypeRef(aTN, module_ast->name,
+                                                              key + "::" + fName + "_type::" + aName + "_type");
+                            if (!fa) out << ",";
+                            fa = false;
+                            out << "{\"name\":\"" << jsonEscape(aName)
+                                << "\",\"kind\":\"" << aKind
+                                << "\",\"type_ref\":" << aRef << "}";
+                        }
+                        out << "]";
+                    } else if (mEff->type == frontend::NodeType::SEQUENCE_OF ||
+                               mEff->type == frontend::NodeType::SET_OF) {
+                        if (mEff->getChildCount() > 0) {
+                            auto elemNode = mEff->getChild(0);
+                            auto elemEff  = elemNode->resolvedTypeNode ? elemNode->resolvedTypeNode : elemNode;
+                            std::string eKind = nodeKindStr(elemEff->type);
+                            std::string eRef  = buildTypeRef(elemNode, module_ast->name,
+                                                              key + "::" + fName + "_element");
+                            out << ",\"element_kind\":\"" << eKind
+                                << "\",\"element_type\":" << eRef;
+                        }
+                    }
+                    out << "}";
+                }
+                out << "\n      ]";
+            } else if (eff->type == frontend::NodeType::CHOICE) {
+                out << ",\n      \"alternatives\": [";
+                bool firstAlt = true;
+                for (size_t ai = 0; ai < eff->getChildCount(); ++ai) {
+                    auto alt = eff->getChild(ai);
+                    if (!alt || alt->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                    if (alt->type != frontend::NodeType::ASSIGNMENT) continue;
+                    auto aTypeNode = alt->getChild(0);
+                    if (!aTypeNode) continue;
+                    auto aEff = aTypeNode->resolvedTypeNode ? aTypeNode->resolvedTypeNode : aTypeNode;
+                    std::string aName = codegen::TypeMap::mangleName(alt->name);
+                    std::string aKind = nodeKindStr(aEff->type);
+                    std::string aRef  = buildTypeRef(aTypeNode, module_ast->name,
+                                                     key + "::" + aName + "_type");
+                    if (!firstAlt) out << ",";
+                    firstAlt = false;
+                    out << "\n        {";
+                    out << "\"name\":\"" << jsonEscape(aName) << "\",";
+                    out << "\"kind\":\"" << aKind << "\",";
+                    out << "\"type_ref\":" << aRef;
+                    out << "}";
+                }
+                out << "\n      ]";
+            } else if (eff->type == frontend::NodeType::ENUMERATION) {
+                out << ",\n      \"values\": [";
+                bool firstVal = true;
+                for (size_t vi = 0; vi < eff->getChildCount(); ++vi) {
+                    auto en = eff->getChild(vi);
+                    if (!en || en->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                    if (!firstVal) out << ",";
+                    firstVal = false;
+                    out << "\"" << jsonEscape(codegen::TypeMap::mangleName(en->name)) << "\"";
+                }
+                out << "]";
+            } else if (eff->type == frontend::NodeType::SEQUENCE_OF ||
+                       eff->type == frontend::NodeType::SET_OF) {
+                if (eff->getChildCount() > 0) {
+                    auto elemNode = eff->getChild(0);
+                    auto elemEff  = elemNode->resolvedTypeNode ? elemNode->resolvedTypeNode : elemNode;
+                    std::string eKind = nodeKindStr(elemEff->type);
+                    std::string eRef  = buildTypeRef(elemNode, module_ast->name, key + "_element");
+                    out << ",\n      \"element_kind\": \"" << eKind << "\"";
+                    out << ",\n      \"element_type\": " << eRef;
+                }
+            }
+            // for aliases/primitives: just kind is enough
+            out << "\n    }";
+        }
+    }
+    out << "\n  ]\n}\n";
+    return out.str();
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printUsage(argv[0]);
@@ -223,6 +464,7 @@ int main(int argc, char* argv[]) {
     bool runTests = false;
     bool verbose = false;
     bool emitJson = false;
+    bool emitSchema = false;
     std::vector<std::string> includePaths;
 
     for (int i = 1; i < argc; i++) {
@@ -248,6 +490,8 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) includePaths.push_back(argv[++i]);
         } else if (arg == "--json") {
             emitJson = true;
+        } else if (arg == "--schema") {
+            emitSchema = true;
         } else if (arg == "--test") {
             runTests = true;
         } else if (arg == "-v" || arg == "--verbose") {
@@ -627,6 +871,17 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
                 utils::Logger::info("JSON adapters written to: " + jsonOutputFile);
+            }
+
+            // ── Optional: Schema JSON file ───────────────────────────────────
+            if (emitSchema) {
+                std::string schemaJson = buildSchemaJson(all_asts, moduleEmittedTypes);
+                std::string schemaOutputFile = outputBaseName + "_schema.json";
+                if (!utils::FileLoader::saveFile(schemaOutputFile, schemaJson)) {
+                    utils::Logger::error("Failed to write: " + schemaOutputFile);
+                    return 1;
+                }
+                utils::Logger::info("Type schema written to: " + schemaOutputFile);
             }
         }
 
