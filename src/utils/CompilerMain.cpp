@@ -255,6 +255,8 @@ static std::string nodeKindStr(frontend::NodeType t) {
         case NT::REAL:           return "REAL";
         case NT::OBJECT_IDENTIFIER: return "OID";
         case NT::ANY_TYPE:       return "ANY";
+        case NT::IDENTIFIER:
+        case NT::FIELD_REFERENCE: return "ALIAS";
         default:                 return "UNKNOWN";
     }
 }
@@ -300,8 +302,8 @@ static std::pair<std::string,std::string> resolveSeqOfElem(
     std::string eKind = nodeKindStr(elemEff->type);
     std::string eRef  = buildTypeRef(elemNode, moduleName, inlineHint);
 
-    if (eKind == "UNKNOWN" &&
-        elemNode->type == frontend::NodeType::IDENTIFIER &&
+    if (elemNode->type == frontend::NodeType::IDENTIFIER &&
+        !elemNode->resolvedName.has_value() &&
         !elemNode->name.empty()) {
         for (const auto& mast : all_asts) {
             if (!mast || mast->type != frontend::NodeType::MODULE) continue;
@@ -419,6 +421,137 @@ static void emitIeArray(std::ostringstream& out,
     out << "]";
 }
 
+static void emitChoiceAlternativesSchema(std::ostringstream& out, const frontend::AsnNodePtr& eff, const std::string& moduleName, const std::string& key, const std::vector<frontend::AsnNodePtr>& all_asts);
+static void emitFieldsSchema(std::ostringstream& out, const frontend::AsnNodePtr& eff, const std::string& moduleName, const std::string& key, const std::vector<frontend::AsnNodePtr>& all_asts);
+
+static void emitChoiceAlternativesSchema(std::ostringstream& out, const frontend::AsnNodePtr& eff, const std::string& moduleName, const std::string& key, const std::vector<frontend::AsnNodePtr>& all_asts) {
+    bool fa = true;
+    for (size_t ai = 0; ai < eff->getChildCount(); ++ai) {
+        auto alt = eff->getChild(ai);
+        if (!alt || alt->type == frontend::NodeType::EXTENSION_MARKER) continue;
+        if (alt->type != frontend::NodeType::ASSIGNMENT) continue;
+        auto aTN = alt->getChild(0);
+        if (!aTN) continue;
+        auto aEff = aTN->resolvedTypeNode ? aTN->resolvedTypeNode : aTN;
+        std::string aName = codegen::TypeMap::mangleName(alt->name);
+        std::string aKind = nodeKindStr(aEff->type);
+        std::string aRef  = buildTypeRef(aTN, moduleName,
+                                          key + "::" + aName + "_type");
+        if (!fa) out << ",";
+        fa = false;
+        out << "\n        {\"name\":\"" << jsonEscape(aName)
+            << "\",\"kind\":\"" << aKind
+            << "\",\"type_ref\":" << aRef;
+            
+        // Inline type handling for choice alternatives
+        if (aEff->type == frontend::NodeType::SEQUENCE || aEff->type == frontend::NodeType::SET) {
+            out << ",\"fields\":[";
+            emitFieldsSchema(out, aEff, moduleName, key + "::" + aName + "_type", all_asts);
+            out << "]";
+        } else if (aEff->type == frontend::NodeType::CHOICE) {
+            out << ",\"alternatives\":[";
+            emitChoiceAlternativesSchema(out, aEff, moduleName, key + "::" + aName + "_type", all_asts);
+            out << "]";
+        } else if (aEff->type == frontend::NodeType::ENUMERATION) {
+            out << ",\"values\":[";
+            bool fv = true;
+            for (size_t vi = 0; vi < aEff->getChildCount(); ++vi) {
+                auto en = aEff->getChild(vi);
+                if (!en || en->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                if (!fv) out << ",";
+                fv = false;
+                out << "\"" << jsonEscape(codegen::TypeMap::mangleName(en->name)) << "\"";
+            }
+            out << "]";
+        } else if (aEff->type == frontend::NodeType::SEQUENCE_OF || aEff->type == frontend::NodeType::SET_OF) {
+            if (aEff->getChildCount() > 0) {
+                auto elemNode = aEff->getChild(0);
+                auto [eKind, eRef] = resolveSeqOfElem(
+                    elemNode, moduleName,
+                    key + "::" + aName + "_element", all_asts);
+                out << ",\"element_kind\":\"" << eKind
+                    << "\",\"element_type\":" << eRef;
+            }
+            emitIeArray(out, aTN, all_asts);
+        }
+        
+        out << "}";
+    }
+}
+
+static void emitFieldsSchema(std::ostringstream& out, const frontend::AsnNodePtr& eff, const std::string& moduleName, const std::string& key, const std::vector<frontend::AsnNodePtr>& all_asts) {
+    bool firstField = true;
+    bool inExt = false;
+    for (size_t fi = 0; fi < eff->getChildCount(); ++fi) {
+        auto member = eff->getChild(fi);
+        if (!member) continue;
+        if (member->type == frontend::NodeType::EXTENSION_MARKER) {
+            inExt = true; continue;
+        }
+        if (member->type != frontend::NodeType::ASSIGNMENT) continue;
+        auto mTypeNode = member->getChild(0);
+        if (!mTypeNode) continue;
+        auto mEff = mTypeNode->resolvedTypeNode ? mTypeNode->resolvedTypeNode : mTypeNode;
+        std::string fName = codegen::TypeMap::mangleName(member->name);
+        std::string fKind = nodeKindStr(mEff->type);
+        std::string fRef  = buildTypeRef(mTypeNode, moduleName,
+                                         key + "::" + fName + "_type");
+        if (!firstField) out << ",";
+        firstField = false;
+        out << "\n        {";
+        out << "\"name\":\"" << jsonEscape(fName) << "\",";
+        out << "\"json_key\":\"" << jsonEscape(member->name) << "\",";
+        out << "\"type_ref\":" << fRef << ",";
+        out << "\"kind\":\"" << fKind << "\",";
+        out << "\"optional\":" << (member->isOptional || inExt ? "true" : "false");
+
+        if (mEff->type == frontend::NodeType::ENUMERATION) {
+            out << ",\"values\":[";
+            bool fv = true;
+            for (size_t vi = 0; vi < mEff->getChildCount(); ++vi) {
+                auto en = mEff->getChild(vi);
+                if (!en || en->type == frontend::NodeType::EXTENSION_MARKER) continue;
+                if (!fv) out << ",";
+                fv = false;
+                out << "\"" << jsonEscape(codegen::TypeMap::mangleName(en->name)) << "\"";
+            }
+            out << "]";
+        } else if (mEff->type == frontend::NodeType::CHOICE) {
+            out << ",\"alternatives\":[";
+            emitChoiceAlternativesSchema(out, mEff, moduleName, key + "::" + fName + "_type", all_asts);
+            out << "]";
+        } else if (mEff->type == frontend::NodeType::SEQUENCE ||
+                   mEff->type == frontend::NodeType::SET) {
+            out << ",\"fields\":[";
+            emitFieldsSchema(out, mEff, moduleName, key + "::" + fName + "_type", all_asts);
+            out << "]";
+        } else if (mEff->type == frontend::NodeType::SEQUENCE_OF ||
+                   mEff->type == frontend::NodeType::SET_OF) {
+            if (mEff->getChildCount() > 0) {
+                auto elemNode = mEff->getChild(0);
+                auto [eKind, eRef] = resolveSeqOfElem(
+                    elemNode, moduleName,
+                    key + "::" + fName + "_element", all_asts);
+                out << ",\"element_kind\":\"" << eKind
+                    << "\",\"element_type\":" << eRef;
+            }
+            emitIeArray(out, mTypeNode, all_asts);
+        }
+        if (member->hasDefault && member->value.has_value()) {
+            const std::string& dv = member->value.value();
+            if (!dv.empty() && dv.front() == '"') {
+                std::string stripped = dv.substr(1, dv.size() - 2);
+                out << ",\"default\":\"" << jsonEscape(stripped) << "\"";
+            } else if (member->defaultValueIsIdentifier) {
+                out << ",\"default\":\"" << jsonEscape(dv) << "\"";
+            } else {
+                out << ",\"default\":" << dv;
+            }
+        }
+        out << "}";
+    }
+}
+
 // Build JSON schema for all emitted types.
 static std::string buildSchemaJson(
     const std::vector<frontend::AsnNodePtr>& all_asts,
@@ -449,8 +582,6 @@ static std::string buildSchemaJson(
             std::string mangledName = codegen::TypeMap::mangleName(node->name);
             std::string key = modName + "::" + mangledName;
             std::string kind = nodeKindStr(eff->type);
-            // For IDENTIFIER references (typedef), pick up the effective kind
-            if (eff->type == frontend::NodeType::IDENTIFIER) kind = "ALIAS";
 
             if (!firstType) out << ",\n";
             firstType = false;
@@ -463,116 +594,11 @@ static std::string buildSchemaJson(
             if (eff->type == frontend::NodeType::SEQUENCE ||
                 eff->type == frontend::NodeType::SET) {
                 out << ",\n      \"fields\": [";
-                bool firstField = true;
-                bool inExt = false;
-                for (size_t fi = 0; fi < eff->getChildCount(); ++fi) {
-                    auto member = eff->getChild(fi);
-                    if (!member) continue;
-                    if (member->type == frontend::NodeType::EXTENSION_MARKER) {
-                        inExt = true; continue;
-                    }
-                    if (member->type != frontend::NodeType::ASSIGNMENT) continue;
-                    auto mTypeNode = member->getChild(0);
-                    if (!mTypeNode) continue;
-                    auto mEff = mTypeNode->resolvedTypeNode ? mTypeNode->resolvedTypeNode : mTypeNode;
-                    std::string fName = codegen::TypeMap::mangleName(member->name);
-                    std::string fKind = nodeKindStr(mEff->type);
-                    std::string fRef  = buildTypeRef(mTypeNode, module_ast->name,
-                                                     key + "::" + fName + "_type");
-                    if (!firstField) out << ",";
-                    firstField = false;
-                    out << "\n        {";
-                    out << "\"name\":\"" << jsonEscape(fName) << "\",";
-                    out << "\"json_key\":\"" << jsonEscape(member->name) << "\",";
-                    out << "\"type_ref\":" << fRef << ",";
-                    out << "\"kind\":\"" << fKind << "\",";
-                    out << "\"optional\":" << (member->isOptional || inExt ? "true" : "false");
-
-                    // Embed inline type details so the frontend is self-contained.
-                    if (mEff->type == frontend::NodeType::ENUMERATION) {
-                        out << ",\"values\":[";
-                        bool fv = true;
-                        for (size_t vi = 0; vi < mEff->getChildCount(); ++vi) {
-                            auto en = mEff->getChild(vi);
-                            if (!en || en->type == frontend::NodeType::EXTENSION_MARKER) continue;
-                            if (!fv) out << ",";
-                            fv = false;
-                            out << "\"" << jsonEscape(codegen::TypeMap::mangleName(en->name)) << "\"";
-                        }
-                        out << "]";
-                    } else if (mEff->type == frontend::NodeType::CHOICE) {
-                        out << ",\"alternatives\":[";
-                        bool fa = true;
-                        for (size_t ai = 0; ai < mEff->getChildCount(); ++ai) {
-                            auto alt = mEff->getChild(ai);
-                            if (!alt || alt->type == frontend::NodeType::EXTENSION_MARKER) continue;
-                            if (alt->type != frontend::NodeType::ASSIGNMENT) continue;
-                            auto aTN = alt->getChild(0);
-                            if (!aTN) continue;
-                            auto aEff = aTN->resolvedTypeNode ? aTN->resolvedTypeNode : aTN;
-                            std::string aName = codegen::TypeMap::mangleName(alt->name);
-                            std::string aKind = nodeKindStr(aEff->type);
-                            std::string aRef  = buildTypeRef(aTN, module_ast->name,
-                                                              key + "::" + fName + "_type::" + aName + "_type");
-                            if (!fa) out << ",";
-                            fa = false;
-                            out << "{\"name\":\"" << jsonEscape(aName)
-                                << "\",\"kind\":\"" << aKind
-                                << "\",\"type_ref\":" << aRef << "}";
-                        }
-                        out << "]";
-                    } else if (mEff->type == frontend::NodeType::SEQUENCE_OF ||
-                               mEff->type == frontend::NodeType::SET_OF) {
-                        if (mEff->getChildCount() > 0) {
-                            auto elemNode = mEff->getChild(0);
-                            auto [eKind, eRef] = resolveSeqOfElem(
-                                elemNode, module_ast->name,
-                                key + "::" + fName + "_element", all_asts);
-                            out << ",\"element_kind\":\"" << eKind
-                                << "\",\"element_type\":" << eRef;
-                        }
-                        emitIeArray(out, mTypeNode, all_asts);
-                    }
-                    // Emit ASN.1 DEFAULT value so the frontend can pre-fill the input.
-                    if (member->hasDefault && member->value.has_value()) {
-                        const std::string& dv = member->value.value();
-                        if (!dv.empty() && dv.front() == '"') {
-                            // String literal stored as "\"text\"" — strip the C++ quotes.
-                            std::string stripped = dv.substr(1, dv.size() - 2);
-                            out << ",\"default\":\"" << jsonEscape(stripped) << "\"";
-                        } else if (member->defaultValueIsIdentifier) {
-                            // Enum identifier — emit as JSON string.
-                            out << ",\"default\":\"" << jsonEscape(dv) << "\"";
-                        } else {
-                            // Numeric — emit as JSON number.
-                            out << ",\"default\":" << dv;
-                        }
-                    }
-                    out << "}";
-                }
+                emitFieldsSchema(out, eff, module_ast->name, key, all_asts);
                 out << "\n      ]";
             } else if (eff->type == frontend::NodeType::CHOICE) {
                 out << ",\n      \"alternatives\": [";
-                bool firstAlt = true;
-                for (size_t ai = 0; ai < eff->getChildCount(); ++ai) {
-                    auto alt = eff->getChild(ai);
-                    if (!alt || alt->type == frontend::NodeType::EXTENSION_MARKER) continue;
-                    if (alt->type != frontend::NodeType::ASSIGNMENT) continue;
-                    auto aTypeNode = alt->getChild(0);
-                    if (!aTypeNode) continue;
-                    auto aEff = aTypeNode->resolvedTypeNode ? aTypeNode->resolvedTypeNode : aTypeNode;
-                    std::string aName = codegen::TypeMap::mangleName(alt->name);
-                    std::string aKind = nodeKindStr(aEff->type);
-                    std::string aRef  = buildTypeRef(aTypeNode, module_ast->name,
-                                                     key + "::" + aName + "_type");
-                    if (!firstAlt) out << ",";
-                    firstAlt = false;
-                    out << "\n        {";
-                    out << "\"name\":\"" << jsonEscape(aName) << "\",";
-                    out << "\"kind\":\"" << aKind << "\",";
-                    out << "\"type_ref\":" << aRef;
-                    out << "}";
-                }
+                emitChoiceAlternativesSchema(out, eff, module_ast->name, key, all_asts);
                 out << "\n      ]";
             } else if (eff->type == frontend::NodeType::ENUMERATION) {
                 out << ",\n      \"values\": [";
