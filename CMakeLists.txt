@@ -55,6 +55,11 @@ set(ASN1_SCHEMAS
     schemas/nr-rrc-15.6.0.asn1
 )
 
+# ── APER schemas — compiled with --encoding aper ──────────────────────────────
+set(APER_SCHEMAS
+    schemas/e1ap_15.4.asn1
+)
+
 # ── C schemas → generated headers + static C libraries ───────────────────────
 set(GENERATED_C_DIR ${CMAKE_BINARY_DIR}/generated_c)
 file(MAKE_DIRECTORY ${GENERATED_C_DIR})
@@ -150,6 +155,38 @@ add_custom_target(dist_runtime_headers ALL
     COMMENT "Staging runtime headers → dist/include/runtime"
 )
 
+# ── APER schemas → generated C++ headers + static libraries ──────────────────
+
+set(GENERATED_APER_DIR ${CMAKE_BINARY_DIR}/generated_aper)
+file(MAKE_DIRECTORY ${GENERATED_APER_DIR})
+
+foreach(SCHEMA ${APER_SCHEMAS})
+    get_filename_component(_SCHEMA_FULL_NAME ${SCHEMA} NAME)
+    string(REPLACE ".asn1" "" _SCHEMA_STEM ${_SCHEMA_FULL_NAME})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" LIB_NAME ${_SCHEMA_STEM})
+
+    set(APER_LIB_NAME ${LIB_NAME}_aper)
+    set(GEN_APER_H   ${GENERATED_APER_DIR}/${LIB_NAME}.h)
+    set(GEN_APER_CPP ${GENERATED_APER_DIR}/${LIB_NAME}.cpp)
+
+    add_custom_command(
+        OUTPUT  ${GEN_APER_H} ${GEN_APER_CPP}
+        COMMAND $<TARGET_FILE:asn1_compiler>
+                ${CMAKE_CURRENT_SOURCE_DIR}/${SCHEMA}
+                -o ${GENERATED_APER_DIR}/${LIB_NAME}
+                --encoding aper
+        DEPENDS asn1_compiler ${CMAKE_CURRENT_SOURCE_DIR}/${SCHEMA}
+        COMMENT "Compiling ASN.1 schema (APER): ${SCHEMA}"
+    )
+
+    add_library(${APER_LIB_NAME} STATIC ${GEN_APER_CPP})
+    target_include_directories(${APER_LIB_NAME} PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${GENERATED_APER_DIR}
+    )
+    target_link_libraries(${APER_LIB_NAME} PUBLIC asn1_runtime)
+endforeach()
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 enable_testing()
 add_subdirectory(tests)
@@ -198,6 +235,30 @@ foreach(SCHEMA ${ASN1_SCHEMAS})
         target_link_libraries(${_C_TEST_TARGET} PRIVATE ${LIB_NAME}_c)
         add_test(NAME SchemaTests_${LIB_NAME}_c COMMAND ${_C_TEST_TARGET})
         message(STATUS "  C schema test : ${_C_TEST_TARGET}")
+    endif()
+endforeach()
+
+# ── APER schema integration tests ────────────────────────────────────────────
+# Each tests/<schema-stem>/ directory may contain test_<lib_name>_aper.cpp.
+foreach(SCHEMA ${APER_SCHEMAS})
+    get_filename_component(_SCHEMA_FULL_NAME ${SCHEMA} NAME)
+    string(REPLACE ".asn1" "" _SCHEMA_STEM ${_SCHEMA_FULL_NAME})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" LIB_NAME ${_SCHEMA_STEM})
+
+    set(APER_LIB_NAME ${LIB_NAME}_aper)
+    set(_APER_TEST_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/${_SCHEMA_STEM}/test_${LIB_NAME}_aper.cpp)
+
+    if(EXISTS ${_APER_TEST_SRC})
+        set(_APER_TEST_TARGET schema_tests_${LIB_NAME}_aper)
+        add_executable(${_APER_TEST_TARGET} ${_APER_TEST_SRC})
+        target_include_directories(${_APER_TEST_TARGET} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${GENERATED_APER_DIR}
+        )
+        target_link_libraries(${_APER_TEST_TARGET} PRIVATE ${APER_LIB_NAME})
+        add_test(NAME SchemaTests_${LIB_NAME}_aper COMMAND ${_APER_TEST_TARGET})
+        message(STATUS "  APER schema test : ${_APER_TEST_TARGET}")
     endif()
 endforeach()
 

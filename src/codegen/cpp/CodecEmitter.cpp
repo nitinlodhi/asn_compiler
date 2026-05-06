@@ -871,9 +871,24 @@ std::string CodecEmitter::generateEnumeratedLogic(const frontend::AsnNodePtr& no
             }
             code += formatter.formatCode("    default: break;\n");
             code += formatter.formatCode("}\n");
-            code += formatter.formatCode("UperExtension::encodeExtensionMarker(writer, is_extended);\n\n");
+            if (!aperMode) {
+                code += formatter.formatCode("UperExtension::encodeExtensionMarker(writer, is_extended);\n\n");
+            }
         } else {
-            code += formatter.formatCode("bool is_extended = UperExtension::decodeExtensionMarker(reader);\n\n");
+            if (aperMode) {
+                code += formatter.formatCode("bool is_extended = false;\n");
+                code += formatter.formatCode("size_t enum_index_ext = 0;\n");
+                code += formatter.formatCode("{\n");
+                formatter.indent();
+                code += formatter.formatCode("bool _ext = false;\n");
+                code += formatter.formatCode("int64_t _idx = AperInteger::decodeConstrainedIntExt(reader, 0LL, " + std::to_string(numRootEnumerators - 1) + "LL, _ext);\n");
+                code += formatter.formatCode("is_extended = _ext;\n");
+                code += formatter.formatCode("enum_index_ext = static_cast<size_t>(_idx);\n");
+                formatter.dedent();
+                code += formatter.formatCode("}\n\n");
+            } else {
+                code += formatter.formatCode("bool is_extended = UperExtension::decodeExtensionMarker(reader);\n\n");
+            }
         }
     }
 
@@ -891,7 +906,9 @@ std::string CodecEmitter::generateEnumeratedLogic(const frontend::AsnNodePtr& no
         }
         code += formatter.formatCode("    default: throw std::runtime_error(\"Invalid enum value for encoding root\");\n");
         code += formatter.formatCode("}\n");
-        if (aperMode) {
+        if (aperMode && hasExtension) {
+            code += formatter.formatCode("AperInteger::encodeConstrainedIntExt(writer, static_cast<int64_t>(enum_index), 0LL, " + std::to_string(numRootEnumerators - 1) + "LL);\n");
+        } else if (aperMode) {
             code += formatter.formatCode("AperInteger::encodeConstrainedInt(writer, static_cast<int64_t>(enum_index), 0LL, " + std::to_string(numRootEnumerators - 1) + "LL);\n");
         } else {
             code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, enum_index, " + std::to_string(numRootEnumerators) + ");\n");
@@ -906,7 +923,9 @@ std::string CodecEmitter::generateEnumeratedLogic(const frontend::AsnNodePtr& no
     } else { // Decoder
         code += formatter.formatCode("if (" + std::string(hasExtension ? "!is_extended" : "true") + ") {\n");
         formatter.indent();
-        if (aperMode) {
+        if (aperMode && hasExtension) {
+            code += formatter.formatCode("size_t enum_index = enum_index_ext;\n");
+        } else if (aperMode) {
             code += formatter.formatCode("size_t enum_index = static_cast<size_t>(AperInteger::decodeConstrainedInt(reader, 0LL, " + std::to_string(numRootEnumerators - 1) + "LL));\n");
         } else {
             code += formatter.formatCode("size_t enum_index = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootEnumerators) + ");\n");
@@ -1317,7 +1336,9 @@ std::string CodecEmitter::generateIntegerLogic(const frontend::AsnNodePtr& node,
                 code += formatter.formatCode("throw std::runtime_error(\"INTEGER constraint violation: value \" + std::to_string(" + varName + ") + \" out of range [" + std::to_string(minVal) + ", " + std::to_string(maxVal) + "].\");\n");
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
-                if (aperMode) {
+                if (aperMode && node->hasExtension) {
+                    code += formatter.formatCode("AperInteger::encodeConstrainedIntExt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
+                } else if (aperMode) {
                     code += formatter.formatCode("AperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
                 } else {
                     code += formatter.formatCode("UperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
@@ -1325,7 +1346,9 @@ std::string CodecEmitter::generateIntegerLogic(const frontend::AsnNodePtr& node,
                 return code;
             } else {
                 std::string code;
-                if (aperMode) {
+                if (aperMode && node->hasExtension) {
+                    code += formatter.formatCode("{ bool _ext_ignored = false; " + varName + " = AperInteger::decodeConstrainedIntExt(reader, " + minStr + ", " + maxStr + ", _ext_ignored); }\n");
+                } else if (aperMode) {
                     code += formatter.formatCode(varName + " = AperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");
                 } else {
                     code += formatter.formatCode(varName + " = UperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");

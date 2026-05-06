@@ -1057,6 +1057,9 @@ AsnNodePtr AsnParser::parseInteger() {
         auto constraint = parseConstraint();
         if (constraint) {
             integer->addChild(constraint);
+            if (constraint->hasExtension) {
+                integer->hasExtension = true;
+            }
         }
     }
 
@@ -1156,9 +1159,11 @@ AsnNodePtr AsnParser::parseConstraint() {
         }
     }
 
-    // Skip extension marker ", ..." inside constraints (e.g., INTEGER (0..4095, ...))
+    // Record extension marker ", ..." inside constraints (e.g., INTEGER (0..4095, ...))
     if (match(TokenType::COMMA)) {
-        match(TokenType::ELLIPSIS);
+        if (match(TokenType::ELLIPSIS)) {
+            constraintNode->hasExtension = true;
+        }
     }
 
     consume(TokenType::RPAREN, "Expected ')' to close constraint.");
