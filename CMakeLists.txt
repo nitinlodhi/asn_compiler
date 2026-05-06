@@ -34,6 +34,7 @@ target_link_libraries(asn1_compiler PRIVATE
     frontend
     runtime_core
     runtime_uper
+    runtime_aper
     codegen_base
     codegen_cpp
     codegen_c
@@ -45,6 +46,7 @@ target_link_libraries(asn1_compiler PRIVATE
 add_library(asn1_runtime STATIC
     $<TARGET_OBJECTS:runtime_core>
     $<TARGET_OBJECTS:runtime_uper>
+    $<TARGET_OBJECTS:runtime_aper>
 )
 target_include_directories(asn1_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 

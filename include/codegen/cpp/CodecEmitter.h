@@ -24,6 +24,7 @@ private:
     std::string currentModuleName;
     int recursion_depth = 0;
     std::set<const void*> processingNodes;  // Track node pointers being processed to detect cycles
+    bool aperMode = false;
     std::string generateMemberCodecCall(const frontend::AsnNodePtr& member, const std::string& varName, bool isEncoder);
 
 public:
@@ -31,6 +32,7 @@ public:
     ~CodecEmitter() = default;
 
     void setContext(const frontend::SymbolTable& table, const std::string& moduleName);
+    void setAperMode(bool enabled) { aperMode = enabled; }
 
     std::string emitEncoderDeclaration(const frontend::AsnNodePtr& assignmentNode, const std::string& moduleName);
     std::string emitDecoderDeclaration(const frontend::AsnNodePtr& assignmentNode, const std::string& moduleName);

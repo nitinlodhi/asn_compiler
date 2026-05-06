@@ -90,10 +90,23 @@ std::string JsonEmitter::emitPreamble() {
 
     code += "} // namespace asn1::runtime\n\n";
 
-    // std::any adapter: opaque fields serialize as null, deserialize as no-op.
+    // std::any adapter: if it holds a BitString, serialize as hex; else null.
     code += "namespace nlohmann {\n";
     code += "template <> struct adl_serializer<std::any> {\n";
-    code += "    static void to_json(json& j, const std::any& /*v*/) { j = nullptr; }\n";
+    code += "    static void to_json(json& j, const std::any& v) {\n";
+    code += "        if (v.has_value() && v.type() == typeid(asn1::runtime::BitString)) {\n";
+    code += "            const auto& bs = std::any_cast<const asn1::runtime::BitString&>(v);\n";
+    code += "            j = json::object();\n";
+    code += "            std::string hex;\n";
+    code += "            hex.reserve(bs.data.size() * 2);\n";
+    code += "            static const char* digits = \"0123456789abcdef\";\n";
+    code += "            for (uint8_t b : bs.data) { hex += digits[b >> 4]; hex += digits[b & 0xF]; }\n";
+    code += "            j[\"hex\"] = hex;\n";
+    code += "            j[\"bit_length\"] = bs.bit_length;\n";
+    code += "        } else {\n";
+    code += "            j = nullptr;\n";
+    code += "        }\n";
+    code += "    }\n";
     code += "    static void from_json(const json& /*j*/, std::any& /*v*/) {}\n";
     code += "};\n";
     code += "} // namespace nlohmann\n\n";

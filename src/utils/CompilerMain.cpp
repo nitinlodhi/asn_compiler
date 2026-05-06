@@ -33,6 +33,7 @@ void printUsage(const char* programName) {
               << "  --lang <cpp|c>        Output language (default: cpp)\n"
               << "  --json                Also emit <base>_json.hpp with nlohmann/json adapters\n"
               << "  --schema              Also emit <base>_schema.json with type definitions\n"
+              << "  --encoding <uper|aper> Encoding rules (default: uper)\n"
               << "  --test                Run validation tests\n"
               << "  -v, --verbose         Enable verbose output\n"
               << "  -h, --help            Show this help message\n";
@@ -645,6 +646,7 @@ int main(int argc, char* argv[]) {
     bool verbose = false;
     bool emitJson = false;
     bool emitSchema = false;
+    bool aperEncoding = false;
     std::vector<std::string> includePaths;
 
     for (int i = 1; i < argc; i++) {
@@ -672,6 +674,11 @@ int main(int argc, char* argv[]) {
             emitJson = true;
         } else if (arg == "--schema") {
             emitSchema = true;
+        } else if (arg == "--encoding") {
+            if (i + 1 < argc) {
+                std::string enc = argv[++i];
+                aperEncoding = (enc == "aper");
+            }
         } else if (arg == "--test") {
             runTests = true;
         } else if (arg == "-v" || arg == "--verbose") {
@@ -880,7 +887,9 @@ int main(int argc, char* argv[]) {
             // ── C++ backend (default) ─────────────────────────────────────────
             codegen::CppEmitter emitter;
             emitter.setOutputNamespace(outputNamespace);
+            emitter.setAperMode(aperEncoding);
             codegen::CodecEmitter codec_emitter;
+            codec_emitter.setAperMode(aperEncoding);
             // Tracks which types were actually emitted per module (for JSON pass filtering).
             std::unordered_map<std::string, std::unordered_set<std::string>> moduleEmittedTypes;
 

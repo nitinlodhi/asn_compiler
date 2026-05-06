@@ -6,4 +6,4 @@ add_library(codegen_cpp STATIC
     JsonEmitter.cpp
 )
 target_include_directories(codegen_cpp PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(codegen_cpp PRIVATE codegen_base frontend runtime_uper)
+target_link_libraries(codegen_cpp PRIVATE codegen_base frontend runtime_uper runtime_aper)

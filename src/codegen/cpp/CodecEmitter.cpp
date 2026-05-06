@@ -433,8 +433,8 @@ std::string CodecEmitter::generateSequenceLogic(const frontend::AsnNodePtr& node
                 // Write a zero-length open type wrapper so the stream stays well-formed.
                 code += formatter.formatCode("UperExtension::encodeOpenType(writer, {}); // open type\n");
             } else {
-                // Decoder: read and discard the open type bytes.
-                code += formatter.formatCode("UperExtension::decodeOpenType(reader); // open type\n");
+                // Decoder: read open type bytes and store as BitString in the std::any field.
+                code += formatter.formatCode(varName + "." + id(member->name) + " = UperExtension::decodeOpenType(reader);\n");
             }
         } else { // Mandatory field
             code += generateMemberCodecCall(member, varName + "." + id(member->name), isEncoder);
@@ -565,10 +565,9 @@ std::string CodecEmitter::generateMemberCodecCall(const frontend::AsnNodePtr& me
     if (!typeNode) return ""; // Should not happen with a valid AST
 
     frontend::AsnNodePtr effectiveTypeNode = typeNode;
-    
-    // If the type is a reference, it might have a resolved node pointing to the actual type definition.
-    if (typeNode->resolvedTypeNode) {
-        effectiveTypeNode = typeNode->resolvedTypeNode;
+    while (effectiveTypeNode->resolvedTypeNode) {
+        if (effectiveTypeNode->resolvedName.has_value() && effectiveTypeNode->resolvedName.value().find(".") != std::string::npos) break;
+        effectiveTypeNode = effectiveTypeNode->resolvedTypeNode;
     }
 
     // If the original type was a reference to a user-defined type (not a primitive),
@@ -578,7 +577,7 @@ std::string CodecEmitter::generateMemberCodecCall(const frontend::AsnNodePtr& me
     // 2. The type is an inline definition (not a top-level assignment)
     // For now, to fix the immediate issue, we only call generated functions
     // for types that have a module prefix in their qualified name.
-    if ((typeNode->type == frontend::NodeType::IDENTIFIER || typeNode->type == frontend::NodeType::FIELD_REFERENCE) &&
+    if ((effectiveTypeNode->type == frontend::NodeType::IDENTIFIER || effectiveTypeNode->type == frontend::NodeType::FIELD_REFERENCE) &&
         typeNode->resolvedName.has_value() &&
         typeNode->resolvedName.value().find('.') != std::string::npos)
     {
@@ -726,6 +725,7 @@ std::string CodecEmitter::generateChoiceLogic(const frontend::AsnNodePtr& node, 
             code += formatter.formatCode("if (!is_extended) {\n");
             formatter.indent();
             code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, " + choiceIndexVar + ", " + std::to_string(numRootChoices) + ");\n");
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             formatter.dedent();
             code += formatter.formatCode("} else {\n");
             formatter.indent();
@@ -734,7 +734,9 @@ std::string CodecEmitter::generateChoiceLogic(const frontend::AsnNodePtr& node, 
             formatter.dedent();
             code += formatter.formatCode("}\n\n");
         } else {
-            code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, " + choiceIndexVar + ", " + std::to_string(numRootChoices) + ");\n\n");
+            code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, " + choiceIndexVar + ", " + std::to_string(numRootChoices) + ");\n");
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
+            code += "\n";
         }
 
         code += formatter.formatCode("std::visit([&](auto&& " + argN + ") {\n");
@@ -766,6 +768,7 @@ std::string CodecEmitter::generateChoiceLogic(const frontend::AsnNodePtr& node, 
             code += formatter.formatCode("if (!is_extended) {\n");
             formatter.indent();
             code += formatter.formatCode(choiceIndexVar + " = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootChoices) + ");\n");
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             formatter.dedent();
             code += formatter.formatCode("} else {\n");
             formatter.indent();
@@ -776,7 +779,9 @@ std::string CodecEmitter::generateChoiceLogic(const frontend::AsnNodePtr& node, 
             formatter.dedent();
             code += formatter.formatCode("}\n\n");
         } else {
-            code += formatter.formatCode(choiceIndexVar + " = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootChoices) + ");\n\n");
+            code += formatter.formatCode(choiceIndexVar + " = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootChoices) + ");\n");
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
+            code += "\n";
         }
 
         code += formatter.formatCode("switch (" + choiceIndexVar + ") {\n");
@@ -886,7 +891,11 @@ std::string CodecEmitter::generateEnumeratedLogic(const frontend::AsnNodePtr& no
         }
         code += formatter.formatCode("    default: throw std::runtime_error(\"Invalid enum value for encoding root\");\n");
         code += formatter.formatCode("}\n");
-        code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, enum_index, " + std::to_string(numRootEnumerators) + ");\n");
+        if (aperMode) {
+            code += formatter.formatCode("AperInteger::encodeConstrainedInt(writer, static_cast<int64_t>(enum_index), 0LL, " + std::to_string(numRootEnumerators - 1) + "LL);\n");
+        } else {
+            code += formatter.formatCode("UperChoice::encodeChoiceIndex(writer, enum_index, " + std::to_string(numRootEnumerators) + ");\n");
+        }
         formatter.dedent();
         code += formatter.formatCode("} else {\n");
         formatter.indent();
@@ -897,7 +906,11 @@ std::string CodecEmitter::generateEnumeratedLogic(const frontend::AsnNodePtr& no
     } else { // Decoder
         code += formatter.formatCode("if (" + std::string(hasExtension ? "!is_extended" : "true") + ") {\n");
         formatter.indent();
-        code += formatter.formatCode("size_t enum_index = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootEnumerators) + ");\n");
+        if (aperMode) {
+            code += formatter.formatCode("size_t enum_index = static_cast<size_t>(AperInteger::decodeConstrainedInt(reader, 0LL, " + std::to_string(numRootEnumerators - 1) + "LL));\n");
+        } else {
+            code += formatter.formatCode("size_t enum_index = UperChoice::decodeChoiceIndex(reader, " + std::to_string(numRootEnumerators) + ");\n");
+        }
         code += formatter.formatCode("switch (enum_index) {\n");
         for (size_t i = 0; i < resolvedEnumerators.size(); ++i) {
             if (!mangledTypeName.empty()) {
@@ -961,8 +974,10 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             }
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("for (uint8_t byte : " + varName + ") {\n");
@@ -974,8 +989,10 @@ std::string CodecEmitter::generateOctetStringLogic(const frontend::AsnNodePtr& n
         code += formatter.formatCode("{\n");
         formatter.indent();
         if (!constrained) {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
                 std::string lenCond = (minSize > 0)
@@ -1039,8 +1056,10 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             }
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("writer.writeBytes(reinterpret_cast<const uint8_t*>(" + varName + ".data()), " + varName + ".size() * 8);\n");
@@ -1048,8 +1067,10 @@ std::string CodecEmitter::generateCharacterStringLogic(const frontend::AsnNodePt
         code += formatter.formatCode("{\n");
         formatter.indent();
         if (!constrained) {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
                 std::string lenCond = (minSize > 0)
@@ -1106,8 +1127,10 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             }
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".bit_length, " + minStr + ", " + maxStr + ");\n");
         } else {
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".bit_length);\n");
         }
         code += formatter.formatCode("writer.writeBytes(" + varName + ".data.data(), " + varName + ".bit_length);\n");
@@ -1116,8 +1139,10 @@ std::string CodecEmitter::generateBitStringLogic(const frontend::AsnNodePtr& nod
         code += formatter.formatCode("{\n");
         formatter.indent();
         if (!constrained) {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode(varName + ".bit_length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode(varName + ".bit_length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
                 // Fixed-size is always valid by construction; ranged size needs an explicit check
@@ -1230,8 +1255,10 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
             }
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeLength(writer, " + varName + ".size(), " + minStr + ", " + maxStr + ");\n");
         } else {
+            if (aperMode) code += formatter.formatCode("writer.alignToOctet();\n");
             code += formatter.formatCode("UperLength::encodeUnconstrainedLength(writer, " + varName + ".size());\n");
         }
         code += formatter.formatCode("for (const auto& element : " + varName + ") {\n");
@@ -1243,8 +1270,10 @@ std::string CodecEmitter::generateSequenceOfLogic(const frontend::AsnNodePtr& no
         code += formatter.formatCode("{\n");
         formatter.indent();
         if (!constrained) {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeUnconstrainedLength(reader);\n");
         } else {
+            if (aperMode) code += formatter.formatCode("reader.alignToOctet();\n");
             code += formatter.formatCode("size_t length = UperLength::decodeLength(reader, " + minStr + ", " + maxStr + ");\n");
             if (minSize != maxSize) {
                 std::string lenCond = (minSize > 0)
@@ -1288,11 +1317,19 @@ std::string CodecEmitter::generateIntegerLogic(const frontend::AsnNodePtr& node,
                 code += formatter.formatCode("throw std::runtime_error(\"INTEGER constraint violation: value \" + std::to_string(" + varName + ") + \" out of range [" + std::to_string(minVal) + ", " + std::to_string(maxVal) + "].\");\n");
                 formatter.dedent();
                 code += formatter.formatCode("}\n");
-                code += formatter.formatCode("UperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
+                if (aperMode) {
+                    code += formatter.formatCode("AperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
+                } else {
+                    code += formatter.formatCode("UperInteger::encodeConstrainedInt(writer, " + varName + ", " + minStr + ", " + maxStr + ");\n");
+                }
                 return code;
             } else {
                 std::string code;
-                code += formatter.formatCode(varName + " = UperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");
+                if (aperMode) {
+                    code += formatter.formatCode(varName + " = AperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");
+                } else {
+                    code += formatter.formatCode(varName + " = UperInteger::decodeConstrainedInt(reader, " + minStr + ", " + maxStr + ");\n");
+                }
                 code += formatter.formatCode("if (" + varName + " < " + minStr + " || " + varName + " > " + maxStr + ") {\n");
                 formatter.indent();
                 code += formatter.formatCode("throw std::runtime_error(\"INTEGER constraint violation: decoded value \" + std::to_string(" + varName + ") + \" out of range [" + std::to_string(minVal) + ", " + std::to_string(maxVal) + "].\");\n");
@@ -1305,8 +1342,10 @@ std::string CodecEmitter::generateIntegerLogic(const frontend::AsnNodePtr& node,
 
     // Default to unconstrained integer
     if (isEncoder) {
+        if (aperMode) return formatter.formatCode("AperInteger::encodeUnconstrainedInt(writer, " + varName + ");\n");
         return formatter.formatCode("UperInteger::encodeUnconstrainedInt(writer, " + varName + ");\n");
     } else {
+        if (aperMode) return formatter.formatCode(varName + " = AperInteger::decodeUnconstrainedInt(reader);\n");
         return formatter.formatCode(varName + " = UperInteger::decodeUnconstrainedInt(reader);\n");
     }
 }

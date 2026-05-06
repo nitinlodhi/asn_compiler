@@ -93,7 +93,9 @@ std::string CppEmitter::emitSourcePreamble(const std::string& headerToInclude) {
     preamble += "#include \"runtime/uper/UperChoice.h\"\n";
     preamble += "#include \"runtime/uper/UperExtension.h\"\n";
     preamble += "#include \"runtime/uper/UperObjectIdentifier.h\"\n";
-    preamble += "#include \"runtime/uper/UperReal.h\"\n\n";
+    preamble += "#include \"runtime/uper/UperReal.h\"\n";
+    if (aperMode) preamble += "#include \"runtime/aper/AperInteger.h\"\n";
+    preamble += "\n";
     preamble += "using namespace asn1::runtime;\n\n";
     return preamble;
 }

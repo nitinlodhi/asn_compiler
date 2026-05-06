@@ -333,6 +333,9 @@ static void resolveNodeReferences(AsnNodePtr node, const SymbolTable& table, con
         } else {
             node->resolvedName = fieldTypeNode->name;
         }
+        // FIELD_REFERENCE parameters ({IEsSetParam}, {@id}) are object-set metadata,
+        // not type references — skip the general child/param recursion.
+        return;
     } else if (node->type == NodeType::SEQUENCE) {
         // Look for open type fields
         for (const auto& member : node->children) {
@@ -381,9 +384,20 @@ static void resolveNodeReferences(AsnNodePtr node, const SymbolTable& table, con
         }
     }
 
-    // If this is a parameterized type definition, don't resolve its body here.
-    // The body will be resolved upon instantiation/usage.
+    // If this is a parameterized type definition, still attempt to resolve
+    // IOC field references (Class.&field) in its body — these use the real
+    // class names, not the formal parameter placeholders, so resolution
+    // succeeds even without knowing the actual instantiation arguments.
+    // Other references that truly depend on formal parameters may fail; we
+    // swallow those errors so the rest of the body is still processed.
     if (node->type == NodeType::ASSIGNMENT && node->isParameterized) {
+        for (const auto& child : node->children) {
+            try {
+                resolveNodeReferences(child, table, scope, moduleNode, resolution_path);
+            } catch (const std::runtime_error&) {
+                // Formal-parameter-dependent reference — skip silently.
+            }
+        }
         return;
     }
 

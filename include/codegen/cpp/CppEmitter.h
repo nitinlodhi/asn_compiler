@@ -15,6 +15,7 @@ private:
     Formatter formatter;
     TypeMap typeMap;
     int recursion_depth = 0;
+    bool aperMode = false;
 
 public:
     CppEmitter();
@@ -30,6 +31,7 @@ public:
     std::string emitSequenceOf(const frontend::AsnNodePtr& assignmentNode, const std::string& moduleName);
     
     void setOutputNamespace(const std::string& ns);
+    void setAperMode(bool enabled) { aperMode = enabled; }
     std::string handleOptionalFields(const frontend::AsnNodePtr& node);
 };
 
