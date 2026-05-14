@@ -1013,6 +1013,9 @@ AsnNodePtr AsnParser::parseOctetString() {
         auto constraint = parseConstraint();
         if (constraint) {
             octetStringNode->addChild(constraint);
+            if (constraint->hasExtension) {
+                octetStringNode->hasExtension = true;
+            }
         }
     }
 
@@ -1032,6 +1035,9 @@ AsnNodePtr AsnParser::parseBitString() {
         auto constraint = parseConstraint();
         if (constraint) {
             bitStringNode->addChild(constraint);
+            if (constraint->hasExtension) {
+                bitStringNode->hasExtension = true;
+            }
         }
     }
 
@@ -1112,8 +1118,12 @@ AsnNodePtr AsnParser::parseConstraint() {
         if (match(TokenType::DOTDOT)) {
             constraintNode->addChild(parseConstraintBound());
         }
-        // Skip extension marker inside SIZE constraint (e.g., SIZE(1..150,...))
-        if (match(TokenType::COMMA)) match(TokenType::ELLIPSIS);
+        // Record extension marker inside SIZE constraint (e.g., SIZE(1..150,...))
+        if (match(TokenType::COMMA)) {
+            if (match(TokenType::ELLIPSIS)) {
+                constraintNode->hasExtension = true;
+            }
+        }
         consume(TokenType::RPAREN, "Expected ')' to close size constraint range.");
     } else if (match(TokenType::WITH)) {
         // This is a WITH COMPONENTS constraint: (WITH COMPONENTS { a, b, ... })

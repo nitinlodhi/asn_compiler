@@ -12,16 +12,22 @@ void AperInteger::encodeConstrainedInt(BitWriter& writer, int64_t value, int64_t
         return; // zero bits
     }
 
-    writer.alignToOctet();
-
-    if (numValues <= 256) {
+    if (numValues < 256) {
+        // X.691 §12.2.2b: range 2..255 — min bits, no leading alignment, trailing alignment
         int bits = RangeUtils::calculateRangeBits(minVal, maxVal);
         writer.writeBits(normalized, bits);
         writer.alignToOctet();
     } else if (numValues <= 65536) {
-        writer.writeBits((normalized >> 8) & 0xFF, 8);
-        writer.writeBits(normalized & 0xFF, 8);
+        // X.691 §12.2.2c/d: range 256..65536 — leading-aligned
+        writer.alignToOctet();
+        if (numValues == 256) {
+            writer.writeBits(normalized & 0xFF, 8);
+        } else {
+            writer.writeBits((normalized >> 8) & 0xFF, 8);
+            writer.writeBits(normalized & 0xFF, 8);
+        }
     } else {
+        writer.alignToOctet();
         int byteCount;
         if (normalized < (1LL << 8)) byteCount = 1;
         else if (normalized < (1LL << 16)) byteCount = 2;
@@ -42,18 +48,24 @@ int64_t AperInteger::decodeConstrainedInt(BitReader& reader, int64_t minVal, int
         return minVal;
     }
 
-    reader.alignToOctet();
-
     int64_t normalized;
-    if (numValues <= 256) {
+    if (numValues < 256) {
+        // X.691 §12.2.2b: range 2..255 — min bits, no leading alignment, trailing alignment
         int bits = RangeUtils::calculateRangeBits(minVal, maxVal);
         normalized = reader.readBits(bits);
         reader.alignToOctet();
     } else if (numValues <= 65536) {
-        int64_t hi = reader.readBits(8);
-        int64_t lo = reader.readBits(8);
-        normalized = (hi << 8) | lo;
+        // X.691 §12.2.2c/d: range 256..65536 — leading-aligned
+        reader.alignToOctet();
+        if (numValues == 256) {
+            normalized = reader.readBits(8);
+        } else {
+            int64_t hi = reader.readBits(8);
+            int64_t lo = reader.readBits(8);
+            normalized = (hi << 8) | lo;
+        }
     } else {
+        reader.alignToOctet();
         int indicator = static_cast<int>(reader.readBits(8));
         int byteCount = (indicator >> 6) + 1;
         normalized = 0;
@@ -80,18 +92,22 @@ void AperInteger::encodeConstrainedIntExt(BitWriter& writer, int64_t value, int6
         return;
     }
 
-    if (numValues <= 256) {
-        // ext=0 bit followed immediately by value bits, then pad to byte boundary
+    if (numValues < 256) {
+        // X.691 §12.2.2b with ext bit: ext=0 + min bits, NO trailing alignment
         int bits = RangeUtils::calculateRangeBits(minVal, maxVal);
         writer.writeBits(0, 1);           // extension bit = 0
         writer.writeBits(normalized, bits);
-        writer.alignToOctet();
+        // no alignToOctet — caller or next field handles alignment
     } else if (numValues <= 65536) {
-        // ext=0 byte (ext bit + 7 padding), then 2 value bytes
+        // ext=0 byte (ext bit + 7 padding), then 1 or 2 value bytes
         writer.writeBits(0, 1);
         writer.alignToOctet();
-        writer.writeBits((normalized >> 8) & 0xFF, 8);
-        writer.writeBits(normalized & 0xFF, 8);
+        if (numValues == 256) {
+            writer.writeBits(normalized & 0xFF, 8);
+        } else {
+            writer.writeBits((normalized >> 8) & 0xFF, 8);
+            writer.writeBits(normalized & 0xFF, 8);
+        }
     } else {
         int byteCount;
         if (normalized < (1LL << 8)) byteCount = 1;
@@ -116,15 +132,20 @@ int64_t AperInteger::decodeConstrainedIntExt(BitReader& reader, int64_t minVal, 
         return minVal;
     }
 
-    if (numValues <= 256) {
+    if (numValues < 256) {
+        // X.691 §12.2.2b with ext bit: ext=0 + min bits, NO trailing alignment
         int bits = RangeUtils::calculateRangeBits(minVal, maxVal);
         isExtended = (reader.readBits(1) != 0);
         int64_t normalized = reader.readBits(bits);
-        reader.alignToOctet();
+        // no alignToOctet — caller or next field handles alignment
         return minVal + normalized;
     } else if (numValues <= 65536) {
         isExtended = (reader.readBits(1) != 0);
         reader.alignToOctet(); // skip 7 padding bits
+        if (numValues == 256) {
+            int64_t normalized = reader.readBits(8);
+            return minVal + normalized;
+        }
         int64_t hi = reader.readBits(8);
         int64_t lo = reader.readBits(8);
         return minVal + ((hi << 8) | lo);
